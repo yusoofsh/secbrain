@@ -340,3 +340,4 @@ Release binaries are built from this repository by [GitHub Actions](.github/work
 </a>
 
 [MIT License](LICENSE) · [Discussions](https://github.com/rahilp/second-brain-cloudflare/discussions)
+ 
