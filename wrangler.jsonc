@@ -2,6 +2,13 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "secbrain",
 	"main": "src/index.ts",
+	"workers_dev": true,
+	"routes": [
+		{
+			"pattern": "secbrain.yusoofsh.id",
+			"custom_domain": true
+		}
+	],
 	"compatibility_date": "2026-06-17",
 	"compatibility_flags": [
 		"nodejs_compat"
