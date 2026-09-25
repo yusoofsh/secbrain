@@ -239,6 +239,16 @@ Having connection issues? See [Connect to AI Clients → Troubleshooting](https:
 
 ### 3. Manual deployment
 
+The existing production `secbrain` Worker deploys from `main` through
+`.github/workflows/deploy-worker.yml`. The workflow reuses the D1, KV,
+Vectorize, Workers AI, route, and cron configuration in `wrangler.jsonc`; it
+does not create resources or run database migrations. `--keep-vars` retains
+dashboard-managed Worker variables, and Wrangler preserves existing secrets.
+GitHub needs the `CLOUDFLARE_ACCOUNT_ID` repository variable and the
+`CLOUDFLARE_API_TOKEN` Actions secret. The token is limited to Workers Scripts
+editing in the Yusoof Moh account and expires on 2027-09-27; rotate the secret
+before then.
+
 For developers who want full command-line control:
 
 ```bash
