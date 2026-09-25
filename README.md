@@ -245,9 +245,10 @@ Vectorize, Workers AI, route, and cron configuration in `wrangler.jsonc`; it
 does not create resources or run database migrations. `--keep-vars` retains
 dashboard-managed Worker variables, and Wrangler preserves existing secrets.
 GitHub needs the `CLOUDFLARE_ACCOUNT_ID` repository variable and the
-`CLOUDFLARE_API_TOKEN` Actions secret. The token is limited to Workers Scripts
-editing in the Yusoof Moh account and expires on 2027-09-27; rotate the secret
-before then.
+`CLOUDFLARE_API_TOKEN` Actions secret. The Cloudflare token can edit Workers
+Scripts across the Yusoof Moh account, read account settings, user details, and
+memberships, and edit routes only in the `yusoofsh.id` zone. It expires on
+2027-09-27 Jakarta time; rotate the secret before then.
 
 For developers who want full command-line control:
 
