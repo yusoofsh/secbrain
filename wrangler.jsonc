@@ -36,6 +36,13 @@
 	"vars": {
 		"VECTORIZE_GRACE_MS": "300000"
 	},
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		}
+	},
 	"secrets": {
 		"required": ["AUTH_TOKEN"]
 	},
