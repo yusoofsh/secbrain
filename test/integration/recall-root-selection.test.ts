@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULTS } from "../../src/config";
 import { DEFAULT_EMBEDDING_QUERY_MODE } from "../../src/recall/query-profile";
 import { recallEntries } from "../../src/recall/search";
+import { resetFtsReadyMemo } from "../../src/recall/fts";
 import type { RecallDiagnostics } from "../../src/recall/types";
 import { D1Mock } from "../helpers/d1-mock";
 import { makeTestEnv, makeVectorizeMock } from "../helpers/make-env";
@@ -44,11 +45,15 @@ describe("recall root selection", () => {
     const observedPrepare = vi.spyOn(observed.db, "prepare");
     const diagnostics: RecallDiagnostics = {};
 
+    // The readiness answer is cached per isolate for FTS_READY_CACHE_MS; reset
+    // it so both recalls start cold and the get counts stay comparable.
+    resetFtsReadyMemo();
     const ordinaryResult = await recallEntries(
       { query: "why atlas ledger changed", topK: 5, hops: 1, synthesize: false },
       ordinary.env,
       ctx,
     );
+    resetFtsReadyMemo();
     const observedResult = await recallEntries(
       { query: "why atlas ledger changed", topK: 5, hops: 1, synthesize: false },
       observed.env,
@@ -231,7 +236,9 @@ describe("recall root selection", () => {
     const prepare = db.prepare.bind(db);
     (db as any).prepare = (sql: string) => {
       if (sql.includes("AS total") && sql.includes("SUM(CASE WHEN content LIKE")) {
-        return { bind: () => ({ first: async () => ({ total: 100, d0: 90, d1: 15, d2: 80, d3: 85 }) }) };
+        const row = { total: 100, d0: 90, d1: 15, d2: 80, d3: 85 };
+        // The recall observer runs first() as all() to count rows_read, so the double answers both the same way.
+        return { bind: () => ({ first: async () => row, all: async () => ({ results: [row], meta: {} }) }) };
       }
       if (sql.includes("WHERE content LIKE") && sql.includes("ORDER BY created_at DESC LIMIT")) {
         const row = db.entries.find(entry => entry.id === "anchor-root")!;

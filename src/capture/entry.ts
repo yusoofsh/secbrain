@@ -10,10 +10,14 @@ import { deleteStaleVectors, reembedOrThrow, storeEntry } from "./store";
 import { tagsAfterWrite } from "../memory/stale";
 import { getVolatility, withVolatility } from "../memory/volatility";
 import { TAG_LIKE_ESCAPE, tagLikePattern } from "../memory/tag-sql";
+import { projectFilterSql } from "../projects/filter";
+import type { ProjectRow } from "../projects/registry";
 import { rememberTags } from "../tags/vocabulary";
 import { isCapsuleTag } from "../tags/system";
 import { OWNER_WRITE_CONTEXT, type WriteContext } from "../lib/scope";
 import { TRANSCRIPT_SOURCES } from "../constants";
+import type { WhenKind, WhenSource } from "../when/input";
+import { extractUnambiguousDate } from "../when/heuristic";
 
 export function buildEntryFilterQuery(params: {
   n: number;
@@ -28,6 +32,8 @@ export function buildEntryFilterQuery(params: {
    * on a large team and 500'd the request.
    */
   actor?: string;
+  /** Registry rows for one project: entries carrying its tag or any alias. ANDed with `tag`. */
+  project?: readonly ProjectRow[];
 }): { sql: string; bindings: (string | number)[] } {
   const conds: string[] = [];
   const bindings: (string | number)[] = [];
@@ -36,6 +42,11 @@ export function buildEntryFilterQuery(params: {
   // list everything. A read, so over-broad rather than destructive — but a filter that
   // silently stops filtering is worse than one that returns nothing.
   if (params.tag) { conds.push(`tags LIKE ? ${TAG_LIKE_ESCAPE}`); bindings.push(tagLikePattern(params.tag)); }
+  if (params.project) {
+    const project = projectFilterSql(params.project);
+    conds.push(project.clause);
+    bindings.push(...project.bindings);
+  }
   // An equality on one id, ANDed with everything else including the caller's
   // scope clause — so it can only ever narrow what the scope already allowed.
   // Tested against undefined rather than truthiness for the reason the tag
@@ -64,6 +75,16 @@ export type CaptureResult =
   | { status: "merged"; id: string }
   | { status: "replaced"; id: string };
 
+/** Content and tags exactly as captureEntry stores them: trimmed, hashtags lifted into tags, tags lowercased and deduped. */
+export function normalizeCaptureInput(rawContent: string, tags: string[]): { content: string; tags: string[] } {
+  const raw = rawContent.trim();
+  const { cleanContent, hashtags } = extractHashtags(raw);
+  return {
+    content: cleanContent || raw,
+    tags: [...new Set([...tags.map(tag => tag.trim().toLowerCase()).filter(Boolean), ...hashtags])],
+  };
+}
+
 export async function captureEntry(
   rawContent: string,
   tags: string[],
@@ -71,16 +92,17 @@ export async function captureEntry(
   env: Env,
   ctx: ExecutionContext,
   config?: Readonly<Config>,
-  writeCtx: WriteContext = OWNER_WRITE_CONTEXT
+  writeCtx: WriteContext = OWNER_WRITE_CONTEXT,
+  // The time-anchor primitive (src/when/input.ts). Only ever set on the plain
+  // "stored" INSERT below — a merged/replaced/protected write survives as an
+  // EXISTING row with its own timing, which this does not touch.
+  when?: { at: number; kind: WhenKind; source: WhenSource },
 ): Promise<CaptureResult> {
   // Resolved once per capture and threaded through duplicate detection and
   // every embed below. Recall and capture must agree on EMBEDDING_MODEL or the
   // vectors they produce are not comparable.
   const cfg = config ?? await resolveConfig(env);
-  const raw = rawContent.trim();
-  const { cleanContent, hashtags } = extractHashtags(raw);
-  const c = cleanContent || raw;
-  const t = [...new Set([...tags.map(tag => tag.trim().toLowerCase()).filter(Boolean), ...hashtags])];
+  const { content: c, tags: t } = normalizeCaptureInput(rawContent, tags);
 
   const { duplicate: dup, contradiction, mergeAction, neighbors } = await checkDuplicateAndContradiction(c, env, cfg, writeCtx.workspaceId, ctx);
 
@@ -192,9 +214,21 @@ export async function captureEntry(
     ? withStatus(duplicateTags.filter(tag => tag !== "contradiction-resolved"), "draft")
     : duplicateTags;
 
+  // The caller's own `when` always wins. Absent one, a cheap regex pass looks
+  // for an unambiguous future date already in the text — negligible CPU, no
+  // model call — and only ever claims a date nobody could dispute; anything
+  // fuzzier is src/when/pass.ts's job, on a budget, at night.
+  const resolvedWhen = when ?? (() => {
+    const at = extractUnambiguousDate(c, now, cfg.TIMEZONE);
+    return at !== null ? { at, kind: "due" as WhenKind, source: "regex" as WhenSource } : undefined;
+  })();
+
   await env.DB.prepare(
-    `INSERT INTO entries (id, content, tags, source, created_at, updated_at, vector_ids, workspace_id, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(id, c, JSON.stringify(finalTags), source, now, now, "[]", writeCtx.workspaceId, writeCtx.actorId).run();
+    `INSERT INTO entries (id, content, tags, source, created_at, updated_at, vector_ids, workspace_id, actor_id, when_at, when_kind, when_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    id, c, JSON.stringify(finalTags), source, now, now, "[]", writeCtx.workspaceId, writeCtx.actorId,
+    resolvedWhen?.at ?? null, resolvedWhen?.kind ?? null, resolvedWhen?.source ?? null,
+  ).run();
 
   ctx.waitUntil(
     storeEntry(env, id, c, finalTags, source, now, cfg, writeCtx)

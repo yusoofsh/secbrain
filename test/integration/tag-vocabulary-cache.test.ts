@@ -90,10 +90,13 @@ function harness(
   opts: { failScan?: boolean; kv?: KVNamespace } = {},
 ): Harness {
   sqlite = makeSqliteD1();
-  // `updated_at` is added by ALTER in src/db/init.ts rather than in schema.sql, and
-  // that path goes through `exec`, which this facade does not run. Capture writes it
-  // and recall's hydration selects it.
+  // `updated_at` and the time-anchor columns are added by ALTER in src/db/init.ts
+  // rather than in schema.sql, and that path goes through `exec`, which this
+  // facade does not run. Capture writes all four.
   sqlite.db.prepare(`ALTER TABLE entries ADD COLUMN updated_at INTEGER`).run();
+  sqlite.db.prepare(`ALTER TABLE entries ADD COLUMN when_at INTEGER`).run();
+  sqlite.db.prepare(`ALTER TABLE entries ADD COLUMN when_kind TEXT`).run();
+  sqlite.db.prepare(`ALTER TABLE entries ADD COLUMN when_source TEXT`).run();
   entries.forEach((e, i) => sqlite!.seed({ ...e, createdAt: 1_700_000_000_000 + i }));
 
   const issued: string[] = [];
@@ -483,7 +486,7 @@ describe("GET /tags", () => {
     await handleEntriesRoutes(req("GET", "/tags"), new URL("http://localhost/tags"), h.env, h.ctx);
     expect(h.scans()).toHaveLength(1);
 
-    await inferQueryTags("notes about legal work", h.env, undefined, h.ctx, (await identify(h))!);
+    await inferQueryTags("notes about legal work", h.env, h.ctx, (await identify(h))!);
 
     expect(h.scans()).toHaveLength(1);
   });

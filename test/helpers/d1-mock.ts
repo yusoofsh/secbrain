@@ -38,19 +38,23 @@ const tagMatchesLike = (tags: string[], tag: string) =>
 const TRIGGER_DDL = new Map([...readFileSync(resolve(import.meta.dirname, "../../db/schema.sql"), "utf8").matchAll(/CREATE TRIGGER IF NOT EXISTS (\w+)[\s\S]*?END;/g)].map(m => [m[1], m[0].slice(0, -1)]));
 const SCHEMA_PROBE_RESULTS = [
   ...["entries", "edges", "insight_candidates", "workspaces", "users", "memberships",
-    "entry_events", "admin_events", "maintenance_cursor", "prompt_capsule_revisions"]
+    "entry_events", "admin_events", "maintenance_cursor", "prompt_capsule_revisions", "projects",
+    "push_subscriptions", "entries_fts", "entry_counts"]
     .map(name => ({ kind: "table", name })),
   ...["idx_entries_created_at", "idx_entries_source", "idx_entries_workspace_created", "idx_entries_capsule",
     "idx_edges_source", "idx_edges_target", "idx_edges_weight", "idx_insight_candidates_queue",
     "idx_workspaces_kind", "idx_users_token_hash", "idx_users_email", "idx_memberships_workspace",
-    "idx_entry_events_entry", "idx_entry_events_created", "idx_admin_events_created"]
+    "idx_entry_events_entry", "idx_entry_events_created", "idx_admin_events_created",
+    "idx_projects_workspace", "idx_entries_project", "idx_push_subscriptions_workspace"]
     .map(name => ({ kind: "index", name })),
   ...["prompt_capsule_entry_insert", "prompt_capsule_entry_update",
-    "prompt_capsule_entry_delete", "prompt_capsule_workspace_delete"]
+    "prompt_capsule_entry_delete", "prompt_capsule_workspace_delete",
+    "entries_fts_insert", "entries_fts_update", "entries_fts_delete",
+    "entry_counts_insert", "entry_counts_update", "entry_counts_delete"]
     .map(name => ({ kind: "trigger", name, definition: TRIGGER_DDL.get(name) })),
   ...["id", "content", "tags", "source", "created_at", "vector_ids", "recall_count",
     "importance_score", "contradiction_wins", "contradiction_losses", "updated_at",
-    "staleness_checked_at"].map(name => ({ kind: "column", name })),
+    "staleness_checked_at", "when_at", "when_kind", "when_source", "when_label"].map(name => ({ kind: "column", name })),
   ...["workspace_id", "actor_id"].map(name => ({ kind: "column", name })),
   // edges.workspace_id arrives by ALTER on upgraded brains and lives in the base
   // CREATE on fresh ones — either way a migrated brain reports it.
@@ -135,6 +139,16 @@ export class D1Mock {
           if (many.results.length) return { ...many, meta: { changes: 0 } };
           const one = await stmt.first();
           return { results: one ? [one] : [], meta: { changes: 0 } };
+        }
+        // src/db/fts-backfill.ts's nightly integrity-check (Task 5): the
+        // literal FTS5 command, not a write to `entries`. Checked before the
+        // "INSERT INTO entries" branch below, whose startsWith would otherwise
+        // also match "INSERT INTO entries_fts". This mock represents a
+        // healthy, migrated brain (see the sqlite_master liveness branch in
+        // all()), so the honest answer is success — FTS5's real check would
+        // only throw for an index the mock does not simulate corrupting.
+        if (s.startsWith("INSERT INTO entries_fts(entries_fts, rank)")) {
+          return { meta: { changes: 0 } };
         }
         if (s.startsWith("INSERT INTO workspaces")) {
           db.workspaces.push({ id: args[0], kind: args[1], name: args[2], created_at: args[3] });
@@ -254,6 +268,12 @@ export class D1Mock {
           const [staleness_checked_at, id] = args;
           const row = db.entries.find((e: any) => e.id === id);
           if (row) row.staleness_checked_at = staleness_checked_at;
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (s.startsWith("UPDATE entries SET when_at = ?, when_kind = ?, when_source = 'explicit' WHERE id = ?")) {
+          const [when_at, when_kind, id] = args;
+          const row = db.entries.find((e: any) => e.id === id);
+          if (row) { row.when_at = when_at; row.when_kind = when_kind; row.when_source = "explicit"; }
           return { meta: { changes: row ? 1 : 0 } };
         }
         if (s.startsWith("UPDATE entries SET tags = ? WHERE id")) {
@@ -406,6 +426,19 @@ export class D1Mock {
             .sort((a: any, b: any) => a.created_at - b.created_at)[0];
           return row ? { id: row.id } : null;
         }
+        if (s.includes("(SELECT count(*) FROM entries_fts) AS f")) {
+          // src/db/fts-backfill.ts's nightly count parity (Task 5), which
+          // also reads max rowid for the rotating content check's wrap
+          // (combined review FIX 2). The global entries total is summed in
+          // JS from the per-workspace GROUP BY (T-0065), answered by the
+          // branch above — no separate count(*) over entries exists
+          // anymore. This double stands in for a healthy, migrated brain —
+          // same stance as the liveness branch in all() — so an fts count
+          // equal to the entries count and a max rowid of the entries count
+          // is the honest answer; drift is covered against real SQLite in
+          // test/unit/fts-backfill.test.ts, which the mock cannot simulate.
+          return { f: db.entries.length, mx: db.entries.length };
+        }
         if (s.includes("u.role = 'admin'")) {
           // findOwner: oldest admin plus their personal workspace.
           const admin = db.users
@@ -527,6 +560,50 @@ export class D1Mock {
         return null;
       },
       async all() {
+        // src/recall/fts.ts's FTS_LIVENESS_SQL (write-path isolation v2.2,
+        // S1): this mock represents a migrated, healthy brain, so the
+        // honest answer is all four objects present with their exact
+        // stored definitions — the same TRIGGER_DDL text already used for
+        // SCHEMA_PROBE_RESULTS below, with "IF NOT EXISTS" stripped the way
+        // SQLite itself strips it from sqlite_master.sql.
+        if (s.startsWith("SELECT name, sql FROM sqlite_master") && s.includes("entries_fts")) {
+          return {
+            results: [
+              { name: "entries_fts", sql: `CREATE VIRTUAL TABLE entries_fts USING fts5(id UNINDEXED, content, tokenize='trigram')` },
+              ...["entries_fts_insert", "entries_fts_update", "entries_fts_delete"].map(name => ({
+                name,
+                sql: TRIGGER_DDL.get(name)!.replace(/\bIF NOT EXISTS\s+/i, ""),
+              })),
+            ],
+          };
+        }
+        // T-0065's entry_counts analogue of the FTS liveness read directly
+        // above (FIX 1, final review's nightly check). Same "healthy,
+        // migrated brain" stance: all three triggers present with their
+        // exact stored bodies.
+        if (s.startsWith("SELECT name, sql FROM sqlite_master") && s.includes("entry_counts")) {
+          return {
+            results: ["entry_counts_insert", "entry_counts_update", "entry_counts_delete"].map(name => ({
+              name,
+              sql: TRIGGER_DDL.get(name)!.replace(/\bIF NOT EXISTS\s+/i, ""),
+            })),
+          };
+        }
+        // FIX 1's per-workspace parity read: this double is a single-user,
+        // untenanted brain by default (entries seeded without workspace_id
+        // read as "", the pre-tenancy value), and entry_counts is not
+        // separately modelled — the honest "healthy brain" answer for both
+        // the true count and the cached count is the same grouping over
+        // db.entries.
+        if (s.startsWith("SELECT workspace_id, count(*) AS n FROM entries GROUP BY workspace_id")
+          || s === "SELECT workspace_id, n FROM entry_counts") {
+          const byWorkspace = new Map<string, number>();
+          for (const e of db.entries) {
+            const ws = (e as { workspace_id?: string }).workspace_id ?? "";
+            byWorkspace.set(ws, (byWorkspace.get(ws) ?? 0) + 1);
+          }
+          return { results: [...byWorkspace.entries()].map(([workspace_id, n]) => ({ workspace_id, n })) };
+        }
         if (s.startsWith("SELECT type AS kind, name, sql AS definition FROM sqlite_master")) {
           // src/db/init.ts's schema probe. This mock stands in for a deployed brain, and
           // a deployed brain is migrated — its rows carry every ALTER column below — so
@@ -562,15 +639,32 @@ export class D1Mock {
             .map((e: any) => ({ id: e.id, vector_ids: e.vector_ids ?? "[]", content: e.content, tags: e.tags, source: e.source, created_at: e.created_at }));
           return { results };
         }
-        if (s.includes("WHERE content LIKE") && s.includes("ORDER BY created_at DESC LIMIT")) {
-          // Keyword (hybrid recall) query: content LIKE ? OR content LIKE ? ... LIMIT ?
-          const limit = Number(args[args.length - 1]);
-          const patterns = args.slice(0, -1).map((a: any) => String(a).replace(/^%/, "").replace(/%$/, "").toLowerCase());
+        if (/WHERE \(?content LIKE/.test(s) && s.includes("ORDER BY created_at DESC LIMIT")) {
+          // Keyword (hybrid recall) query: content LIKE ? OR content LIKE ? ... LIMIT ?. The keyword arm asks for per-term match levels
+          // instead of the text (src/recall/keyword-rows.ts): the binds end with the lowercased terms (each once, referenced by number) after the limit.
+          const nTerms = (s.match(/ AS p\d+/g) ?? []).length;
+          const tail = nTerms;
+          const limit = Number(args[args.length - 1 - tail]);
+          const patterns = args.slice(0, args.length - 1 - tail).map((a: any) => String(a).replace(/^%/, "").replace(/%$/, "").toLowerCase());
+          const terms: string[] = args.slice(args.length - tail).map((a: any) => String(a));
+          const alone = (lc: string, at: number, len: number) => !/\w/.test(lc[at - 1] ?? "") && !/\w/.test(lc[at + len] ?? "");
+          const level = (lc: string, t: string): number => {
+            const first = lc.indexOf(t);
+            if (first < 0) return 0;
+            if (alone(lc, first, t.length)) return 2;
+            const second = lc.indexOf(t, first + 1);
+            return second >= 0 && alone(lc, second, t.length) ? 2 : 1;
+          };
           const rows = [...db.entries]
             .filter((e: any) => patterns.some((p: string) => String(e.content).toLowerCase().includes(p)))
             .sort((a: any, b: any) => b.created_at - a.created_at)
             .slice(0, limit)
-            .map((e: any) => ({ id: e.id, content: e.content, tags: e.tags, source: e.source, created_at: e.created_at }));
+            .map((e: any) => {
+              const lc = String(e.content).toLowerCase();
+              const row: Record<string, unknown> = { id: e.id, created_at: e.created_at, tags: e.tags, source: e.source };
+              terms.forEach((t, i) => { row[`l${i}`] = level(lc, t); });
+              return row;
+            });
           return { results: rows };
         }
         if (s.includes("FROM entries") && s.includes("id NOT IN (SELECT source_id FROM edges)")) {
@@ -916,8 +1010,8 @@ export class D1Mock {
             .map((e: any) => ({ id: e.id, content: e.content, tags: e.tags, source: e.source, created_at: e.created_at }));
           return { results: rows };
         }
-        if (s.startsWith("SELECT id, content, tags, source, created_at, COALESCE(updated_at, created_at) AS last_updated, recall_count, importance_score, contradiction_wins, contradiction_losses FROM entries") && s.includes("ORDER BY created_at DESC") && !s.includes("WHERE id = ?")) {
-          // GET /export: the caller's readable set, newest first, no LIMIT. The
+        if (s.startsWith("SELECT id, content, tags, source, created_at, COALESCE(updated_at, created_at) AS last_updated, recall_count, importance_score, contradiction_wins, contradiction_losses FROM entries") && s.includes("ORDER BY created_at ASC") && !s.includes("WHERE id = ?")) {
+          // GET /export: the caller's readable set, oldest first, no LIMIT. The
           // route appends `WHERE workspace_id IN (?, ?)` (bound to args), so
           // rows outside those workspaces are withheld here too. `last_updated`
           // models the COALESCE, so a row that never had updated_at written
@@ -925,7 +1019,7 @@ export class D1Mock {
           const workspaces: string[] = args.map((a: any) => String(a));
           const results = [...db.entries]
             .filter((e: any) => !workspaces.length || workspaces.includes(e.workspace_id ?? ""))
-            .sort((a: any, b: any) => b.created_at - a.created_at)
+            .sort((a: any, b: any) => a.created_at - b.created_at)
             .map((e: any) => ({
               id: e.id, content: e.content, tags: e.tags, source: e.source, created_at: e.created_at,
               last_updated: e.updated_at ?? e.created_at,

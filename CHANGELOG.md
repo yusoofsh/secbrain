@@ -2,6 +2,86 @@
 
 All notable changes to Second Brain are documented here. Version numbers match `SB_VERSION` in `src/env.ts` and the desktop app release.
 
+## [Unreleased]
+
+## [3.7.0] — Search that puts the right answer first
+
+**Search**
+
+- Search puts the best match nearer the top more often. After the usual keyword-and-meaning search picks its candidates, a second ranking step (the `bge-reranker-base` cross-encoder on Workers AI) re-reads the closest ones against your question and reorders them. It runs only when the top results are close, and never for a search containing an identifier (a version, file name, ticket number, date or `snake_case` name), which keyword search already answers. On our test set of 1,683 questions the rank of the right answer improved clearly (MRR@10 up 0.058, 95% interval 0.049 to 0.067), most of all for searches built around a rare word (MRR@10 0.58 to 0.86) or a few common words (0.61 to 0.84). Questions worded completely differently from the memory are only slightly better. No kind of search we test got worse on average.
+- The ranking step is on by default and costs about 0.4 extra Workers AI calls and about 0.2 neurons per search on average (in our tests it ran on about two searches in five), so 1,000 searches a day use about 200 of the free plan's 10,000 daily neurons. How long it takes on Workers AI has not been measured yet; a search waits at most 1.5 seconds for it. It switches itself off when it fails or is slow: it turns on only after a self-check passes (repeated about weekly, and failed if the model answers too slowly), and three failures or timeouts in a row turn it off for six hours. Whenever it is off, fails or times out, search returns exactly the order it would have returned without it. `RERANK_MODE` (`off`, `on`, `auto`, default `auto`) is an admin setting in the config API; `off` restores the previous ranking exactly.
+- Searching for identifiers with underscores, such as `DATABASE_URL` and `ERR_TLS_90412`, now finds the matching memories.
+- Questions phrased the way people and AI agents actually ask now find their subject. In "Tell me all about Dana" or "User wants to prepare for a meeting with Dana — what should I know about her?", words that only frame the request (user, wants, tell, should, know, and similar) no longer count as search terms, and a rare name in the question always reaches the ranking even when the rest of the question is made of very common words. A single rare word on its own ("gatewright") now ranks the memory that contains it first.
+- An identifier written next to Chinese, Japanese or Korean text without a space, such as `SB-024の決定`, is now searched as the whole identifier (`sb-024`), the same as when a space is typed. Thanks to @oudouusa (#377).
+- Older memories are found on large brains. A search containing a short word ("io", "id", "k8") or several very common words used to be answered from only the newest 500 matches, so an old memory matching on those words never appeared once a brain passed a few thousand memories. Those searches now rank through the index like any other, and the short word still counts toward the ranking.
+- Those searches also read far fewer rows: on a 20,000-memory brain a search with a short word reads about half as many rows, and the average search about 11% fewer, so the free plan's daily limit goes further on large brains.
+- Searches read far fewer database rows when loading candidate memories, so growing brains stay within the D1 free tier much longer. Workspace visibility remains enforced.
+- Searching a brain with many long notes (session logs, transcripts) costs far less compute. A search used to read every candidate note in full just to see where the words sit; the database now reports that and sends back no note text. On a test brain where one note in five is 20-100 KB, a search fell from about 90 ms of Worker CPU on 3.6.0 to about 11 ms, measured locally (not yet on Cloudflare); brains of ordinary short notes are unchanged. The same change stops a search from asking for the same candidate rows twice when it plans two passes.
+- Searches no longer spend AI calls guessing topic tags. They return faster and use far less of the Workers AI allowance.
+- A thin, generic memory that happens to share two words with your question can no longer take the last result slot from a strong answer. Recall keeps one slot for a memory linked to (or sitting just behind) the ones it found; a memory that reached that slot on keyword matching alone now has to cover most of what you asked for, not a word or two of boilerplate. Memories the semantic search itself ranked, and memories reached through a link, are judged as before.
+- The search that follows links between memories now starts from the memories the semantic search actually ranked. It used to share one fixed number of starting points between semantic and keyword matches, and keyword matches won nearly all of them, so a memory the semantic search had found could be left out of the link search entirely. Each side now gets its own starting points. Only questions that follow links do any extra work, and they read about half a percent more rows to do it.
+- Asking for more results no longer reshuffles the top ones. Search used to size its candidate pool, its diversity pass, and the result slots it reserves for linked memories by how many results you asked for, so the first five of a 10-result search could differ from a 5-result search. A 5-result search returns exactly what it did before, and a larger request now continues that list: up to 20 results, the top ones are the same whatever number you ask for, including when some memories are hidden from you (another workspace, a filter, or a tag that keeps a memory out of results). Linked memories take fixed places in the list (the fifth, and the tenth), so a request for fewer than 5 results usually includes none and one for 6 to 9 usually includes one; when some memories are hidden, a linked memory can move up into a shorter request. A request larger than the list it can rank now draws the rest from a deeper semantic search instead of returning fewer than you asked for.
+
+**Saving and backups**
+
+- Very long memories (a thousand or more pieces) now save and delete in Vectorize-sized batches, and searching for near neighbors when you save a note no longer lets one long memory fill every slot.
+- Backups (`/export`) now list memories oldest first, and restoring (`/import`) accepts a backup in either order, so a restored brain keeps the same search behavior as one built by saving memories one at a time.
+
+**For contributors**
+
+- A recall evaluation, `npm run eval:recall`, runs the real search pipeline against a fixed, fully synthetic set of 1,751 questions in more than 1,400 independent groups. It reports quality for each kind of search (exact identifiers, CJK, rare, common and short words, paraphrase, linked memories, long notes) and cost (D1 statements and rows read, AI calls, neurons), and ends in a PASS, FAIL or INCONCLUSIVE verdict with confidence intervals. It needs no Cloudflare account: embeddings and reranker scores come from pinned open-weights models run locally and are replayed from a committed cache, so it runs offline. Continuous integration runs a fast synthetic smoke check on every pull request; the full evaluation, including a lock test that fails whenever a change alters default search ranking without a deliberate re-lock, runs by hand with `npm run test:eval:full` (or the manual `eval-full` workflow) before merging a ranking change. `src/ARCHITECTURE.md` describes it.
+
+## [3.6.0] — Search that finds the exact thing
+
+**Search**
+
+- Search now finds the hard things: exact names, ticket numbers, versions, and phrases in any language, even when they sit in old memories. A rare match buried under years of newer memories used to be cut from the candidate window before ranking ever saw it; matches now rank by relevance.
+- Finding those exact matches is dramatically faster and cheaper, and stays that way as the brain grows, so the free plan's daily limits stay comfortable. Saving a memory costs one extra small row; the savings come on every search.
+- Upgrading is automatic and needs no action. New installs use the index immediately; existing brains build it over nightly runs and keep the previous search until theirs is complete and verified. No API or MCP tool changed, so no client needs updating.
+- Semantic (vector) search is unchanged.
+
+## [3.5.0] — Brief, reminders, and push notifications
+
+**Brief and open loops**
+
+- The resurface card is honest about what it picks now: it excludes memories that were only true in the moment (episodic) and commitments already marked done, prefers whatever shares one of today's top topics, and never repeats the same pick within 30 days. A Dismiss control retires a pick for good instead of only hiding it for the session.
+- A new open-loops queue tracks commitments (entries tagged "task") that have no completion signal yet, with Done and Not a task actions on each one. The home board shows up to three with a "See all" sheet for the rest, and the attention count already on the brief folds loops in alongside unindexed and stale memories.
+
+**Reminders and due dates**
+
+- Memories can now carry a time anchor. `remember`, `append`, and capture accept an optional `when` (a date or datetime); a free regex pass also catches unambiguous absolute dates written in the content itself ("Sep 30", "9/30/2026") at capture time, no explicit `when` required.
+- A nightly pass asks the model to judge open commitments and volatile memories that neither of the above anchored — phrases like "next Friday" or "end of month" — and only keeps a confident, near-term answer. A dry-run endpoint previews its verdicts without writing anything.
+- A new due feed lists what is overdue and what is coming up in the next two days, with Snooze (tomorrow or next week) and Not a commitment actions on each item.
+- Date-only reminders now anchor to midnight in the brain's own configured timezone rather than UTC, so "due Sep 30" lands on the calendar day it was meant to, DST included.
+
+**Push notifications**
+
+- Second Brain can now send a push notification when something becomes due. Turning it on takes two taps in the Notifications section of the menu — no server setup, no keys to paste — and a content-free option keeps the memory's text out of the notification itself, sending only that something is due.
+- Reminders are checked and sent hourly, encrypted end to end, and capped at three notifications per device per run so a backlog cannot flood a phone.
+- Tapping a reminder opens straight to that item in the due sheet, reliably, whether the app was closed or was already open in the background — a background-only tap used to just focus the app and do nothing.
+- A mobile browser that cannot receive push notifications at all until Second Brain is added to the Home Screen now says so and shows exactly how, instead of a dead-end "not supported" message. Chrome and Edge on Android offer a one-tap native install; everyone else gets the right two or three steps for their browser.
+
+## [3.4.0] — Projects
+
+**Projects**
+
+- Memories can now belong to named projects. A project is a workspace-bound registry entry (slug, display name, description, archived flag); membership is a reserved `project:<slug>` tag on ordinary memories, so every existing filter, recall, digest, and graph path understands it with no re-indexing and no data migration.
+- Aliases adopt existing memories retroactively: a project can claim plain tags you already use, and every project filter matches them alongside the explicit tag. Years of old memories join a project with zero row rewrites.
+- New REST surface: `GET/POST/PATCH/DELETE /projects`, plus a `project=` parameter on `POST /capture`, `GET /list`, `GET /recall`, `GET /digest`, and `GET /graph`. Unknown slugs on reads return `404` with up to ten `known_projects`; capture auto-creates silently.
+- New MCP tool `list_projects`, and a `project` parameter on `remember`, `recall`, and `list_recent`. `remember` silently registers a project the first time it is named; `recall` reports an unknown slug loudly instead of returning an empty result. Tool descriptions teach the four-axis model: workspace is who can see it, project is what it is about, tags are free-form facets, source is where it came from.
+- The dashboard gains a Projects tab: create with a live slug preview, browse each project's memories, edit aliases with tag suggestions and counts, generate a project digest on demand, see prompt-capsule slot status, archive with undo, and delete with the guarantee that memories are kept — only the grouping is removed. The composer gets a project picker and the Memories and recall views a project filter; the graph clusters by project first.
+- Nightly compression now writes per-project digests, one workspace at a time using only that workspace's own registry row, at the same eligibility threshold as topic digests.
+- Prompt capsule project ids are now registered project slugs, enumerable and validated, while unregistered ids keep serving exactly as before.
+- Backups carry projects: `GET /export` is a version 3 payload with a `projects` array and `POST /import` restores names, descriptions, aliases, and archived status. Version 2 and unversioned files still import.
+- Claude Code hooks derive a Worker-legal project slug (dotted repo names like `next.js` no longer fail capture), keep the raw name as a tag, pass `project` on capture and recall, and fall back gracefully when the project is not registered yet.
+
+**Fixes**
+
+- The `/digest` error message now states the real eligibility threshold (10 entries); it previously claimed 20.
+- `GET /tags` accepts `counts=1` to return per-tag memory counts, with an `X-Counts-Approximate` header when the scan is capped; CORS now exposes `ETag` and `X-Counts-Approximate` for cross-origin dashboards.
+- The 64-tag capture cap governs caller-supplied tags only; worker-added `project:` and `volatility:` tags no longer make a previously valid capture fail.
+- `/projects` answers unsupported methods with `405` and an `Allow` header.
+
 ## [3.3.1] — Fixes from the integration review wave
 
 **Integrations**

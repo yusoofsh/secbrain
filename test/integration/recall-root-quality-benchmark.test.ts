@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULTS } from "../../src/config";
-import { graphSeedLimit, relatedSlotLimit } from "../../src/recall/neighborhood";
-import { mmrRerank, rerankWithTimeDecay, type VectorizeMatch } from "../../src/recall/math";
 import { buildQueryProfile } from "../../src/recall/query-profile";
-import type { RootCandidate } from "../../src/recall/root-selector";
-import { rrfFuse } from "../../src/recall/rrf";
 import { recallEntries } from "../../src/recall/search";
 import type { RecallDiagnostics } from "../../src/recall/types";
 import {
@@ -15,6 +11,14 @@ import {
 } from "../fixtures/recall-root-quality";
 import { D1Mock } from "../helpers/d1-mock";
 import { makeTestEnv, makeVectorizeMock } from "../helpers/make-env";
+
+// This frozen benchmark pins the pre-reranker pipeline: its mock AI cannot rank passages, and a probe would count as an extra AI call.
+const NO_RERANK = Object.freeze({ ...DEFAULTS, RERANK_MODE: "off" });
+import {
+  baselineRecall,
+  directTopFourRegressed,
+  rawCandidates,
+} from "../helpers/recall-benchmark-scoring";
 
 const TOP_K = 5;
 
@@ -50,130 +54,15 @@ interface BenchmarkMetrics {
 }
 
 const caseId = (c: RootQualityCase) => `${c.domain}/${c.failureShape}`;
-const rawCandidates = (c: RootQualityCase) => c.candidates.filter(candidate => candidate.denseScore !== undefined || candidate.keywordCandidate);
-const directTopFourRegressed = (currentIds: string[], baselineIds: string[]) =>
-  JSON.stringify(currentIds.slice(0, 4)) !== JSON.stringify(baselineIds.slice(0, 4));
-
-function baselineRootIds(candidates: RootCandidate[], topK: number, lambda: number): string[] {
-  return mmrRerank(candidates, lambda, graphSeedLimit(topK, candidates.length))
-    .map(candidate => candidate.parentId);
-}
-
-function baselineLinkedEligible(content: string, tokens: string[]): boolean {
-  const lower = content.toLowerCase();
-  return tokens.some(token => lower.includes(token.toLowerCase()));
-}
-
-const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-function frozenBaselineCorpus(c: RootQualityCase, tokens: string[]) {
-  return c.failureShape === "weak-generic-neighbor" || c.failureShape === "long-parent-pollution"
-    ? { df: null, total: null }
-    : { df: new Map(tokens.map(token => [token, 2])), total: 100 };
-}
-
-function frozenPrePlanFused(c: RootQualityCase, tokens: string[]): VectorizeMatch[] {
-  const dense = c.candidates
-    .filter((candidate): candidate is CandidateFixture & { denseScore: number } => candidate.denseScore !== undefined)
-    .slice()
-    .sort((a, b) => b.denseScore - a.denseScore);
-  const denseById = new Map(dense.map(candidate => [candidate.id, candidate]));
-  const keyword = c.candidates.filter(candidate => candidate.keywordCandidate);
-  const corpus = frozenBaselineCorpus(c, tokens);
-  const hasCorpusIdf = !!corpus.df && !!corpus.total && tokens.every(token => corpus.df!.has(token));
-  const keywordN = keyword.length || 1;
-  const keywordDf = new Map(tokens.map(token => [
-    token,
-    keyword.filter(candidate => candidate.content.toLowerCase().includes(token.toLowerCase())).length,
-  ]));
-  const idf = (token: string) => hasCorpusIdf
-    ? Math.log(1 + corpus.total! / ((corpus.df!.get(token) ?? 0) + 1))
-    : Math.log(1 + keywordN / ((keywordDf.get(token) ?? 0) + 1));
-  const keywordRanked = keyword
-    .map(candidate => {
-      const lower = candidate.content.toLowerCase();
-      const weight = tokens.reduce((sum, token) => {
-        const normalized = token.toLowerCase();
-        if (!lower.includes(normalized)) return sum;
-        const exact = new RegExp(`(?<![\\w])${escapeRegExp(normalized)}(?![\\w])`).test(lower);
-        return sum + idf(token) * (exact ? 1 : DEFAULTS.SUBSTRING_MATCH_WEIGHT);
-      }, 0);
-      return { candidate, weight };
-    })
-    .filter(row => row.weight > 0)
-    .sort((a, b) => b.weight - a.weight
-      || (b.candidate.createdAt ?? 1) - (a.candidate.createdAt ?? 1)
-      || a.candidate.id.localeCompare(b.candidate.id));
-  const fused = rrfFuse(
-    dense.map(candidate => candidate.id),
-    keywordRanked.map(row => ({ id: row.candidate.id, weight: row.weight })),
-  );
-  const byId = new Map(c.candidates.map(candidate => [candidate.id, candidate]));
-  return [...fused].map(([id, score]) => {
-    const candidate = byId.get(id)!;
-    const denseCandidate = denseById.get(id);
-    return {
-      id,
-      score,
-      metadata: denseCandidate
-        ? { parentId: id, content: denseCandidate.vectorContent, created_at: denseCandidate.createdAt ?? 1 }
-        : { parentId: id, content: candidate.content, created_at: candidate.createdAt ?? 1, tags: candidate.tags ?? [] },
-    };
-  });
-}
-
-function baselineRecall(c: RootQualityCase, tokens: string[]): { outputIds: string[]; directIds: string[]; rootIds: string[] } {
-  const fixtures = rawCandidates(c);
-  const recallCounts = new Map(fixtures.map(candidate => [candidate.id, candidate.recallCount ?? 0]));
-  const tags = new Map(fixtures.map(candidate => [candidate.id, [...(candidate.tags ?? [])]]));
-  const reranked = rerankWithTimeDecay(
-    frozenPrePlanFused(c, tokens),
-    recallCounts,
-    new Map(),
-    [],
-    new Map(),
-    new Map(),
-    tags,
-    DEFAULTS,
-  );
-  const candidates: RootCandidate[] = reranked.map(match => ({
-    ...match,
-    parentId: match.id,
-    rootScore: match.score,
-    localEvidence: c.candidates.find(candidate => candidate.id === match.id)?.vectorContent ?? "",
-    tags: tags.get(match.id) ?? [],
-    lexicalCoverage: 0,
-    metadataAlignment: 0,
-  }));
-  const roots = new Set(baselineRootIds(candidates, TOP_K, DEFAULTS.MMR_LAMBDA));
-  const directIds = mmrRerank(reranked, DEFAULTS.MMR_LAMBDA, TOP_K).map(candidate => candidate.id);
-  const rows = new Map(c.candidates.map(candidate => [candidate.id, candidate]));
-  const related = c.edges
-    .flatMap(edge => {
-      const linkedId = roots.has(edge.sourceId)
-        ? edge.targetId
-        : roots.has(edge.targetId)
-          ? edge.sourceId
-          : undefined;
-      if (!linkedId || directIds.includes(linkedId)) return [];
-      const linked = rows.get(linkedId);
-      return linked && baselineLinkedEligible(linked.content, tokens) ? [linkedId] : [];
-    })
-    .slice(0, relatedSlotLimit(TOP_K));
-  return {
-    outputIds: [...directIds.slice(0, TOP_K - related.length), ...related],
-    directIds,
-    rootIds: [...roots],
-  };
-}
 
 function installControlledQueries(db: D1Mock, c: RootQualityCase): void {
   const prepare = db.prepare.bind(db);
   (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
     if (sql.includes("SELECT COUNT(*) AS total") && sql.includes("SUM(CASE WHEN content LIKE")) {
       return {
-        bind: (...patterns: string[]) => ({
-          first: async () => {
+        bind: (...patterns: string[]) => {
+          // The recall observer runs first() as all() to count rows_read, so the double answers both the same way.
+          const first = async () => {
             // Keep the eight-token weak-neighborhood query intact so its two generic
             // matches clear the lexical-count gate but remain below the score threshold.
             if (c.failureShape === "weak-generic-neighbor" || c.failureShape === "long-parent-pollution") {
@@ -183,8 +72,9 @@ function installControlledQueries(db: D1Mock, c: RootQualityCase): void {
               ["total", 100],
               ...patterns.map((_, index) => [`d${index}`, 2]),
             ]);
-          },
-        }),
+          };
+          return { first, all: async () => ({ results: [await first()], meta: {} }) };
+        },
       };
     }
     if (sql.includes("WHERE content LIKE") && sql.includes("ORDER BY created_at DESC LIMIT")) {
@@ -260,7 +150,7 @@ async function runCase(c: RootQualityCase): Promise<CaseObservation> {
     { query: c.query, topK: TOP_K, hops: 1, synthesize: false },
     graph.env,
     graph.ctx,
-    undefined,
+    NO_RERANK,
     { diagnostics },
   );
   const acceptableRoots = new Set(c.acceptableRootIds);
@@ -270,7 +160,7 @@ async function runCase(c: RootQualityCase): Promise<CaseObservation> {
   const seed = (diagnostics.rootSelections ?? []).some(selection => acceptableRoots.has(selection.id));
   const expanded = (diagnostics.expandedIds ?? []).some(id => authoritative.has(id));
   const outputIds = withGraph.matches.map(match => match.id);
-  const baseline = baselineRecall(c, withGraph.queryTokens ?? []);
+  const baseline = baselineRecall(c, withGraph.queryTokens ?? [], TOP_K);
   const graphAiCalls = (graph.env.AI.run as ReturnType<typeof vi.fn>).mock.calls.length;
 
   return {
@@ -338,10 +228,15 @@ function expectSplitGates(split: RootQualitySplit, metrics: BenchmarkMetrics, ob
   expect(metrics.extraVectorizeQueries, details).toBe(0);
 }
 
+// Scope: these run against test/helpers/d1-mock.ts, whose canned keyword rows make them a
+// test of fusion, root selection, and the graph with a controlled candidate pool. They say
+// nothing about the keyword arm. Real-SQL coverage of the same 30 cases (with a baseline
+// that sees the same keyword pool) is test/eval/legacy-parity.test.ts; retrieval quality on
+// corpora large enough to discriminate keyword strategies is `npm run eval:recall` (T-0043).
 describe("frozen recall root-quality fixture", () => {
   it("matches every declared intent to the runtime query profiler", () => {
     for (const c of ROOT_QUALITY_CASES) {
-      expect(buildQueryProfile(c.query, { query: c.query, df: null, total: null }).intent, caseId(c)).toBe(c.intent);
+      expect(buildQueryProfile(c.query, { query: c.query, df: null, total: null, distillSource: "shortcut" }).intent, caseId(c)).toBe(c.intent);
     }
   });
 
@@ -417,7 +312,7 @@ describe("frozen recall root-quality fixture", () => {
       candidateAvailable: true,
     };
 
-    expect(baselineRecall(probe, ["quasar", "nebula", "orbit"]).directIds[0]).toBe("keyword");
+    expect(baselineRecall(probe, ["quasar", "nebula", "orbit"], TOP_K).directIds[0]).toBe("keyword");
   });
 
   it("contains no manually editable baseline relevance labels", () => {
@@ -533,7 +428,7 @@ describe("frozen recall root-quality benchmark", () => {
   it("AI and Vectorize parity sentinel keeps the controlled path at one call", async () => {
     const c = ROOT_QUALITY_CASES.find(candidate => candidate.failureShape === "crowded-lexical-root" && candidate.split === "development")!;
     const fixture = buildFixture(c);
-    await recallEntries({ query: c.query, topK: TOP_K, hops: 1, synthesize: false }, fixture.env, fixture.ctx);
+    await recallEntries({ query: c.query, topK: TOP_K, hops: 1, synthesize: false }, fixture.env, fixture.ctx, NO_RERANK);
     expect((fixture.env.AI.run as ReturnType<typeof vi.fn>).mock.calls.map(call => call[0])).toEqual([DEFAULTS.EMBEDDING_MODEL]);
     expect(fixture.query).toHaveBeenCalledTimes(1);
   });

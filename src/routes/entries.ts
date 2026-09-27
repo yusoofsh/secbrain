@@ -12,6 +12,10 @@ import { moveEntry, restampVectorWorkspace, type ShareTarget } from "../capture/
 import { auditEvent } from "../lib/audit";
 import { STATUS_VALUES, type MemoryStatus } from "../memory/status";
 import { getTagVocabulary } from "../tags/vocabulary";
+import { projectRowsOf } from "../projects/registry";
+
+/** Most entries GET /tags?counts=1 reads; matches the /projects counts cap. */
+const TAG_COUNTS_SCAN_LIMIT = 5000;
 
 export async function handleEntriesRoutes(
   request: Request,
@@ -38,10 +42,35 @@ export async function handleEntriesRoutes(
   if (url.pathname === "/tags" && request.method === "GET") {
     const auth = await requireIdentity(request, env);
     if (auth instanceof Response) return auth;
-    return json(await getTagVocabulary(env, ctx, auth));
+    const tags = await getTagVocabulary(env, ctx, auth);
+    const counts = url.searchParams.get("counts");
+    if (counts !== "1" && counts !== "true") return json(tags);
+
+    // counts=1: the same tags with how many memories carry each. One bounded scan of
+    // the caller's rows, tallied here; the cached vocabulary keeps the tag set and order.
+    // A capped scan undercounts, so it says so in a header rather than the body shape.
+    const scope = scopeWhere(auth);
+    const { results } = await env.DB.prepare(
+      `SELECT tags FROM entries WHERE ${scope.clause} LIMIT ${TAG_COUNTS_SCAN_LIMIT}`
+    ).bind(...scope.bindings).all<{ tags: string }>();
+    const tally = new Map<string, number>();
+    for (const row of results) {
+      let rowTags: unknown;
+      try { rowTags = JSON.parse(row.tags); } catch { continue; }
+      if (!Array.isArray(rowTags)) continue;
+      for (const tag of new Set(rowTags)) {
+        if (typeof tag === "string") tally.set(tag, (tally.get(tag) ?? 0) + 1);
+      }
+    }
+    const response = json(tags.map(tag => ({ tag, count: tally.get(tag) ?? 0 })));
+    if (results.length >= TAG_COUNTS_SCAN_LIMIT) response.headers.set("X-Counts-Approximate", "1");
+    return response;
   }
 
-  // GET /export — complete backup: every entry plus the edges table. Single
+  // GET /export — complete backup, entries oldest first: a restore inserts in this order and
+  // rowids should follow time (the keyword AND tier reads the index newest-rowid-first).
+  // POST /import re-sorts anyway, so files taken before this order still restore correctly.
+  // Complete backup: every entry plus the edges and projects tables. Single
   // unbounded SELECTs are acceptable here: D1 handles tens of thousands of rows in
   // one read and this route runs on explicit user action only. If response size
   // ever becomes a problem, add ?after= cursor support then, not now.
@@ -53,11 +82,14 @@ export async function handleEntriesRoutes(
     const scope = scopeWhere(auth);
 
     const { results: entryRows } = await env.DB.prepare(
-      `SELECT id, content, tags, source, created_at, COALESCE(updated_at, created_at) AS last_updated, recall_count, importance_score, contradiction_wins, contradiction_losses FROM entries WHERE ${scope.clause} ORDER BY created_at DESC`
+      `SELECT id, content, tags, source, created_at, COALESCE(updated_at, created_at) AS last_updated, recall_count, importance_score, contradiction_wins, contradiction_losses FROM entries WHERE ${scope.clause} ORDER BY created_at ASC`
     ).bind(...scope.bindings).all() as { results: Record<string, any>[] };
     const { results: edgeRows } = await env.DB.prepare(
       `SELECT source_id, target_id, type, weight, provenance, created_at FROM edges WHERE ${scope.clause}`
     ).bind(...scope.bindings).all() as { results: Record<string, any>[] };
+    const { results: projectRows } = await env.DB.prepare(
+      `SELECT id, workspace_id, name, description, aliases, status, created_at, updated_at FROM projects WHERE ${scope.clause} ORDER BY created_at ASC, workspace_id ASC, id ASC`
+    ).bind(...scope.bindings).all();
 
     // vector_ids are deliberately excluded — they're deployment-specific and an
     // import tool re-embeds anyway. Tags are parsed so the file holds real arrays.
@@ -92,7 +124,9 @@ export async function handleEntriesRoutes(
       provenance: r.provenance,
       created_at: r.created_at,
     }));
-    return json({ ok: true, exported_at: Date.now(), version: 2, entries, edges });
+    // Like entries and edges, no workspace_id: a restore lands in the caller's own workspace.
+    const projects = projectRowsOf(projectRows).map(({ workspace_id: _workspace, ...project }) => project);
+    return json({ ok: true, exported_at: Date.now(), version: 3, entries, edges, projects });
   }
 
   // POST /import — round-trip counterpart to GET /export (issue #217). Inserts by
@@ -101,9 +135,10 @@ export async function handleEntriesRoutes(
   // burning the Workers AI quota in one request. Does NOT go through /capture.
   //
   // Paged positionally: one call examines entries[offset .. offset+limit), then —
-  // once entries are exhausted — edges[edge_offset .. edge_offset+limit). Clients
-  // resend the same file with the next_offset/next_edge_offset from the previous
-  // response until both remaining counts are 0. See importExportPayload for why
+  // once entries are exhausted — edges[edge_offset .. edge_offset+limit) and
+  // projects[project_offset .. project_offset+limit). Clients resend the same file
+  // with the next_offset/next_edge_offset/next_project_offset from the previous
+  // response until all three remaining counts are 0. See importExportPayload for why
   // this is what keeps a large restore inside this codebase's self-imposed D1
   // query budget (well under the platform's real per-invocation ceiling).
   if (url.pathname === "/import" && request.method === "POST") {
@@ -125,11 +160,12 @@ export async function handleEntriesRoutes(
     const limit = parseImportLimit(url.searchParams.get("limit"));
     const offset = parseImportOffset(url.searchParams.get("offset"));
     const edgeOffset = parseImportOffset(url.searchParams.get("edge_offset"));
+    const projectOffset = parseImportOffset(url.searchParams.get("project_offset"));
     // Import always lands in the caller's own personal workspace, never the
     // company layer: a restore is not a share, and the company layer is only
     // ever reached through POST /share ("move, not copy").
     const writeCtx = { workspaceId: auth.personalWorkspaceId, actorId: auth.userId };
-    const summary = await importExportPayload(env, parsed.payload, { limit, offset, edgeOffset, writeCtx });
+    const summary = await importExportPayload(env, parsed.payload, { limit, offset, edgeOffset, projectOffset, writeCtx });
     return json(summary);
   }
 
@@ -178,7 +214,7 @@ export async function handleEntriesRoutes(
     const row = await env.DB.prepare(
       `SELECT id, content, tags, source, created_at, COALESCE(updated_at, created_at) AS last_updated,
               importance_score, recall_count, contradiction_wins, contradiction_losses, vector_ids,
-              workspace_id, actor_id
+              workspace_id, actor_id, when_at, when_kind, when_source
        FROM entries WHERE id = ? AND ${scope.clause}`
     ).bind(id, ...scope.bindings).first() as Record<string, any> | null;
     if (!row) return json({ ok: false, error: `No entry found with ID: ${id}` }, 404);
@@ -223,6 +259,9 @@ export async function handleEntriesRoutes(
         // Whether recall can see it at all — the dashboard already surfaces
         // "not indexed" in lists, and the detail view should agree.
         indexed: Array.isArray(vectorIds) && vectorIds.length > 0,
+        when_at: row.when_at ?? null,
+        when_kind: row.when_kind ?? null,
+        when_source: row.when_source ?? null,
         workspace: layer,
         actor_name: actorName,
         // Whether this caller may edit or forget it, answered by the very

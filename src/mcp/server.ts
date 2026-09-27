@@ -1,9 +1,9 @@
-import { MAX_INPUT_TAGS, MAX_INPUT_TAG_CHARS } from "../tags/system";
+import { MAX_INPUT_TAGS, MAX_INPUT_TAG_CHARS, projectSlugError, projectTagError, withProjectTag, PROJECT_SLUG_RE } from "../tags/system";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolveConfig } from "../config";
 import { z } from "zod";
 import type { Env } from "../env";
-import { SEMANTIC_UNAVAILABLE_DETAIL, VECTORIZE_FIX_HINT } from "../constants";
+import { RECALL_MAX_TOP_K, SEMANTIC_UNAVAILABLE_DETAIL, VECTORIZE_FIX_HINT } from "../constants";
 import { buildEntryFilterQuery, captureEntry } from "../capture/entry";
 import { appendToEntry, updateEntryContent } from "../capture/store";
 import { applyStatus, forgetEntry } from "../capture/lifecycle";
@@ -16,16 +16,20 @@ import { getConnections } from "../graph/traverse";
 import type { Identity } from "../lib/identity";
 import { assertCanEditContent, assertCanMutateEntry, getReadableEntry } from "../lib/entry-access";
 import { listTeamWorkspaces } from "../lib/team-admin";
-import { layerOf, scopeWhereForRead, scopeWrite, effectiveWriteTarget, readTeamParam, primaryCompanyWorkspaceId, type WriteContext } from "../lib/scope";
+import { layerOf, scopeWhereForRead, scopeWrite, effectiveWriteTarget, readTeamParam, readScopeWorkspaces, primaryCompanyWorkspaceId, type WriteContext } from "../lib/scope";
 import { isManagedMirror, mirrorEditError } from "../integrations/mirror";
 import { KIND_VALUES, type MemoryKind } from "../memory/kind";
 import { STATUS_VALUES, type MemoryStatus } from "../memory/status";
 import { VOLATILITY_VALUES, withVolatility, type Volatility } from "../memory/volatility";
+import { WHEN_KIND_VALUES, parseExplicitWhen } from "../when/input";
 import { recallEntries } from "../recall/search";
 import { renderRecallText, memoryHeader } from "../recall/render";
 import { RECALL_OUTPUT_BUDGET, SNIPPET_MAX_CHARS, snippetOf, truncationNote } from "../recall/snippet";
 import { buildPromptCapsule } from "../prompt-capsule/build";
 import { PROMPT_CAPSULE_MCP_SCHEMA } from "../prompt-capsule/types";
+import { autoCreateProject } from "../projects/autocreate";
+import { listProjects, type ProjectRow } from "../projects/registry";
+import { resolveProjectRead } from "../projects/resolve";
 
 // Asking the calling model for this is the whole point: it has already read the content
 // in order to decide to store it, so the judgment is free, and it is a far better
@@ -46,6 +50,20 @@ const volatilityParam = z
   .optional()
   .describe(VOLATILITY_DESCRIPTION);
 
+const WHEN_DESCRIPTION =
+  "Optional future date this memory should come back to you: a deadline, an event, or a reminder. "
+  + "Pass either a plain date (2026-06-15) or a full datetime with an explicit UTC/offset "
+  + "(2026-06-15T09:00:00Z or 2026-06-15T09:00:00-05:00). A plain date, or a datetime with no "
+  + "offset, is read as that calendar date/time in the brain's configured timezone (UTC by default).";
+const WHEN_KIND_DESCRIPTION =
+  "What kind of moment `when` marks: due (a deadline), event (something happening then), or wake (a plain reminder, the default).";
+
+const whenParam = z.string().optional().describe(WHEN_DESCRIPTION);
+const whenKindParam = z
+  .enum([...WHEN_KIND_VALUES] as [string, ...string[]])
+  .optional()
+  .describe(WHEN_KIND_DESCRIPTION);
+
 // The read/write tool descriptions below are the only place this behaviour is
 // specified. The server does no reranking, query rewriting, or duplicate
 // classification on the model's behalf — the calling client already has the
@@ -54,6 +72,11 @@ const volatilityParam = z
 // about what a particular brain contains: every filter a client is told to
 // reach for comes from the user's own conversation or from metadata on a
 // returned memory, never from a vocabulary baked in here.
+// The four-axis model, worded identically everywhere an agent is taught it.
+const FOUR_AXES =
+  "Memories live on four axes: workspace = who can see it (personal or shared), project = what it's about, "
+  + "tags = free-form facets, source = where it came from.";
+
 const RECALL_DESCRIPTION =
   "Recall: semantically search your second brain for relevant notes and context. "
   + "Call recall automatically at the start of every conversation and every 3-4 messages.\n\n"
@@ -78,7 +101,9 @@ const RECALL_DESCRIPTION =
   + "when direct matches already answer the question.\n\n"
   + "TRUNCATION. Long memories come back shortened to keep the response small: any result ending in a "
   + "[truncated …] marker is PARTIAL, so call get(id) before relying on its details or quoting it. Results "
-  + "without that marker are complete.";
+  + "without that marker are complete.\n\n"
+  + `PROJECTS. ${FOUR_AXES} Call list_projects to discover projects, then pass project to search inside one. `
+  + "An unknown project slug is an error listing the known ones, not an empty result.";
 
 const GET_DESCRIPTION =
   "Get one memory in full by ID. recall and list_recent return bounded previews, and a result ending in a "
@@ -116,7 +141,11 @@ const REMEMBER_DESCRIPTION =
   + "Do not create a new durable memory for a repeated no-op observation, an "
   + "unchanged status, or a restatement of something already stored.\n\n"
   + "Do store separately when the information is genuinely its own retrieval target: a distinct event, a new "
-  + "decision, a reusable insight, a task, an artifact, or anything you would later want to find on its own.";
+  + "decision, a reusable insight, a task, an artifact, or anything you would later want to find on its own.\n\n"
+  + `PROJECTS. ${FOUR_AXES} Call list_projects to discover projects; pass project on remember when the `
+  + "conversation is about one, and prefer project over a bare topic tag. A project slug that does not exist "
+  + "yet is created automatically in the workspace the memory lands in, so use the slug the user already uses "
+  + "(lowercase letters, digits, - and _).";
 
 const APPEND_DESCRIPTION =
   "Append new information to an existing memory. The original content is preserved and your addition is "
@@ -141,13 +170,22 @@ const LIST_RECENT_DESCRIPTION =
   + "memories that match a meaning, use recall. Long entries are shortened: a result ending in a [truncated …] "
   + "marker is PARTIAL, so call get(id) for its full text. "
   + "Pass actor to list only what one person wrote — their name as shown in the header, their user id, or \"me\". "
-  + "Pass team (id from list_teams) with workspace:\"company\" to browse one team's shared layer.";
+  + "Pass team (id from list_teams) with workspace:\"company\" to browse one team's shared layer. "
+  + "Pass project (slug from list_projects) to browse one project; an unknown slug is an error, not an empty list.";
 
 const LIST_TEAMS_DESCRIPTION =
   "List the shared teams you belong to, with display names and workspace ids. Call this before remember or "
   + "share with workspace:\"company\" when the user has not named a team — especially when more than one team "
   + "is returned. Present the names to the user and ask which team they mean when it matters. Use the id "
   + "(not the display name) as the team parameter on remember, share, recall, and list_recent.";
+
+const LIST_PROJECTS_DESCRIPTION =
+  "List the projects you can read, as slug — name (layer) — description. "
+  + `${FOUR_AXES} Call list_projects to discover projects; pass project on remember when the conversation is `
+  + "about one, and prefer project over a bare topic tag. Passing a slug that does not exist yet to remember "
+  + "creates it automatically. Use the slug as the project argument on remember, recall, and list_recent. "
+  + "Archived projects are hidden unless include_archived is true. Pass workspace or team (id from list_teams) "
+  + "to narrow to one layer.";
 
 const SHARE_DESCRIPTION =
   "Move a memory between your private workspace and a shared team workspace. MOVE semantics: one canonical row; "
@@ -168,6 +206,22 @@ function formatTeamsList(
     return `${i + 1}. ${label} (id: ${t.id}, ${members})${primary}`;
   });
   return `Teams you can read and write:\n\n${lines.join("\n")}\n\nUse the id as the team argument when capturing, sharing, or searching one team.`;
+}
+
+const projectParam = z.string().optional();
+
+/** The reply for a project slug that cannot be resolved: what is wrong, and which slugs exist. */
+function projectErrorText(r: { error: string; known_projects?: string[] }): string {
+  if (!r.known_projects) return r.error;
+  return r.known_projects.length
+    ? `${r.error}. Known projects: ${r.known_projects.join(", ")}. Call list_projects for details.`
+    : `${r.error}. No projects exist in scope yet; remember with a project slug creates one.`;
+}
+
+/** `slug — name (layer) — first description line`, archived marked. */
+function formatProjectLine(identity: Identity, p: ProjectRow): string {
+  const description = p.description.split("\n")[0].trim().slice(0, 200);
+  return `- ${p.id} — ${p.name} (${layerOf(identity, p.workspace_id)})${description ? ` — ${description}` : ""}${p.status === "archived" ? " [archived]" : ""}`;
 }
 
 /** Which layer a raw entries row is in, from the caller's point of view. */
@@ -211,6 +265,22 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
     ? { workspaceId: scopeWrite(identity), actorId: identity.userId }
     : { workspaceId: "", actorId: "" };
 
+  /**
+   * The read-side `project` argument: registry rows, undefined when absent, or the error
+   * text to reply with (bad slug, or unknown with the closest known slugs).
+   */
+  async function resolveProjectArg(
+    raw: string | undefined,
+    layer: "personal" | "company" | undefined,
+    teamId: string | undefined,
+  ): Promise<ProjectRow[] | string | undefined> {
+    const slug = raw?.trim();
+    if (!slug) return undefined;
+    if (!identity) return "Filtering by project requires an authenticated identity.";
+    const resolved = await resolveProjectRead(env, identity, slug, { layer, teamId });
+    return resolved.ok ? resolved.rows : projectErrorText(resolved);
+  }
+
   // ── list_teams ──────────────────────────────────────────────────────────
   server.registerTool(
     "list_teams",
@@ -232,6 +302,38 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
     },
   );
 
+  // ── list_projects ───────────────────────────────────────────────────────
+  server.registerTool(
+    "list_projects",
+    {
+      description: LIST_PROJECTS_DESCRIPTION,
+      inputSchema: {
+        workspace: z.enum(["personal", "company"]).optional().describe("Restrict to one layer: personal or the shared company layer. Omit to list both"),
+        team: z.string().optional().describe("When workspace is company, restrict to one team — id from list_teams"),
+        include_archived: z.boolean().optional().describe("Also list archived projects, marked [archived]. Off by default"),
+      },
+    },
+    async ({ workspace, team, include_archived }) => {
+      if (!identity) {
+        return { content: [{ type: "text", text: "Project listing requires an authenticated identity." }] };
+      }
+      const teamRead = readTeamParam(team, identity, workspace);
+      if (teamRead.error) return { content: [{ type: "text", text: teamRead.error }] };
+      const projects = await listProjects(
+        env.DB,
+        readScopeWorkspaces(identity, { layer: workspace, teamId: teamRead.teamId }),
+        { includeArchived: include_archived === true },
+      );
+      if (!projects.length) {
+        return { content: [{ type: "text", text: "No projects in scope. Passing a new project slug to remember creates one." }] };
+      }
+      const lines = projects.map(p => formatProjectLine(identity, p));
+      return {
+        content: [{ type: "text", text: `Projects you can read (${projects.length}):\n\n${lines.join("\n")}\n\nUse the slug as the project argument on remember, recall, and list_recent.` }],
+      };
+    },
+  );
+
   // ── remember ────────────────────────────────────────────────────────────
   server.registerTool(
     "remember",
@@ -240,13 +342,30 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       inputSchema: {
         content: z.string().refine(value => !value.includes("\0"), "NUL is not allowed").describe("The idea, task, or note to store — one distinct item, written so it still makes sense on its own months from now"),
         tags: z.array(z.string().max(MAX_INPUT_TAG_CHARS).refine(value => !value.includes("\0"), "NUL is not allowed")).max(MAX_INPUT_TAGS).optional().describe("Optional tags for filtering and later retrieval"),
+        project: projectParam.describe("Project slug (lowercase letters, digits, - and _) when the conversation is about one — discover slugs with list_projects. An unknown slug is created automatically. Prefer this over a bare topic tag"),
         source: z.string().optional().describe("Origin: phone, browser, voice, claude"),
         volatility: volatilityParam,
         workspace: z.enum(["personal", "company"]).optional().describe("Where to store it: your private workspace (default) or the shared company layer"),
         team: z.string().optional().describe("When workspace is company, which team workspace — id from list_teams. Omit for your primary team."),
+        when: whenParam,
+        when_kind: whenKindParam,
       },
     },
-    async ({ content, tags, source, volatility, workspace, team }) => {
+    async ({ content, tags, project, source, volatility, workspace, team, when, when_kind }) => {
+      // Same grammar checks, same messages, as POST /capture. Bad input fails before any write.
+      const badProjectTag = tags === undefined ? null : projectTagError(tags);
+      if (badProjectTag) return { content: [{ type: "text", text: badProjectTag }] };
+      let whenInput: { at: number; kind: "due" | "event" | "wake"; source: "explicit" } | undefined;
+      if (when !== undefined) {
+        const parsed = parseExplicitWhen(when, when_kind, undefined, (await resolveConfig(env)).TIMEZONE);
+        if (parsed.error) return { content: [{ type: "text", text: parsed.error }] };
+        whenInput = parsed.value;
+      } else if (when_kind !== undefined) {
+        return { content: [{ type: "text", text: "when_kind requires when" }] };
+      }
+      const projectSlug = project?.trim() || undefined;
+      const badSlug = projectSlug ? projectSlugError(projectSlug) : null;
+      if (badSlug) return { content: [{ type: "text", text: badSlug }] };
       // Folded into the tag list rather than threaded through captureEntry: tags are
       // already the carrier for every other reserved namespace (kind:, status:).
       // withVolatility clears the namespace case-insensitively before appending, so a
@@ -256,7 +375,8 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       // case-sensitive one let "Volatility:durable" through to become a second verdict,
       // and the injected one won.
       const baseTags = tags ?? [];
-      const withVerdict = volatility ? withVolatility(baseTags, volatility as Volatility) : baseTags;
+      const withVerdictOnly = volatility ? withVolatility(baseTags, volatility as Volatility) : baseTags;
+      const withVerdict = projectSlug ? withProjectTag(withVerdictOnly, projectSlug) : withVerdictOnly;
       const orgDefault = (await resolveConfig(env)).TEAM_DEFAULT_WORKSPACE;
       let targetCtx = writeCtx;
       if (identity) {
@@ -270,7 +390,11 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
           actorId: identity.userId,
         };
       }
-      const result = await captureEntry(content, withVerdict, source ?? "claude", env, ctx, undefined, targetCtx);
+      const result = await captureEntry(content, withVerdict, source ?? "claude", env, ctx, undefined, targetCtx, whenInput);
+      // Silent, after the write: a lost registry row never fails the memory.
+      if (identity && projectSlug && result.status !== "blocked") {
+        await autoCreateProject(env, ctx, { workspaceId: targetCtx.workspaceId, actorId: identity.userId, slug: projectSlug });
+      }
       if (identity && result.status !== "blocked") {
         auditEvent(env, ctx, {
           entryId: result.id,
@@ -313,9 +437,11 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
         id: z.string().describe("Entry ID to append to — from recall or list_recent"),
         addition: z.string().refine(value => !value.includes("\0"), "NUL is not allowed").describe("The new information to add to the existing entry — what actually changed, not a restatement of what is already there"),
         volatility: volatilityParam,
+        when: whenParam,
+        when_kind: whenKindParam,
       },
     },
-    async ({ id, addition, volatility }) => {
+    async ({ id, addition, volatility, when, when_kind }) => {
       const row = await getReadableEntry(env, identity, id, "id, workspace_id, actor_id, content, tags, source");
 
       if (!row) {
@@ -327,6 +453,15 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       const denied = assertCanEditContent(identity, row);
       if (denied) {
         return { content: [{ type: "text", text: denied.message }] };
+      }
+
+      let whenInput: { at: number; kind: "due" | "event" | "wake"; source: "explicit" } | undefined;
+      if (when !== undefined) {
+        const parsed = parseExplicitWhen(when, when_kind, undefined, (await resolveConfig(env)).TIMEZONE);
+        if (parsed.error) return { content: [{ type: "text", text: parsed.error }] };
+        whenInput = parsed.value;
+      } else if (when_kind !== undefined) {
+        return { content: [{ type: "text", text: "when_kind requires when" }] };
       }
 
       const existingContent = row.content as string;
@@ -352,6 +487,15 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
         return {
           content: [{ type: "text", text: `Append failed: ${(e as Error).message}` }],
         };
+      }
+
+      // A separate, simple UPDATE rather than threading `when` through
+      // appendToEntry: that function already has two content-rewrite branches
+      // (short append, reembed-on-overflow) and the time anchor is orthogonal
+      // to both — it does not care which one ran.
+      if (whenInput) {
+        await env.DB.prepare(`UPDATE entries SET when_at = ?, when_kind = ?, when_source = 'explicit' WHERE id = ?`)
+          .bind(whenInput.at, whenInput.kind, id).run();
       }
 
       if (identity) {
@@ -385,6 +529,8 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       if (!newContent) {
         return { content: [{ type: "text", text: "Content cannot be empty." }] };
       }
+      const badProjectTag = tags === undefined ? null : projectTagError(tags);
+      if (badProjectTag) return { content: [{ type: "text", text: badProjectTag }] };
 
       // Refuse before anything is written — same guard, same read, as POST /update.
       const row = await getReadableEntry(env, identity, id, "id, workspace_id, actor_id, source");
@@ -497,7 +643,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       description: "Return one deterministic Prompt Capsule and its strong ETag. This read-only tool is for gateways that construct stable prompt prefixes; use recall for query-specific context. Only entries with canonical status are included: give the entry canonical status in its tags at remember time, or call set_status canonical afterwards. To re-slot an entry, use update with tags containing the complete capsule: and capsule-slot: definition.",
       inputSchema: {
         kind: z.enum(["core", "project"]).describe("Capsule kind"),
-        project_id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).optional()
+        project_id: z.string().regex(PROJECT_SLUG_RE).optional()
           .describe("Required for project; omitted for core"),
         workspace: z.enum(["personal", "company"]).default("personal")
           .describe("Read exactly one private or shared workspace layer"),
@@ -569,7 +715,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       description: RECALL_DESCRIPTION,
       inputSchema: {
         query: z.string().describe("Natural language search query. Say what the topic is and what you are trying to do with it, and name the subject explicitly — resolve references like \"it\", \"that project\", or \"the last one\" from the conversation before querying"),
-        topK: z.number().int().min(1).max(20).default(5).describe("Number of results. 5 (the default) gives enough candidates to compare before choosing; raise it to survey a topic, lower it only when a single exact hit is all you need"),
+        topK: z.number().int().min(1).max(RECALL_MAX_TOP_K).default(5).describe("Number of results. 5 (the default) gives enough candidates to compare before choosing; raise it to survey a topic, lower it only when a single exact hit is all you need"),
         tag: z.string().optional().describe("Filter by a specific tag. Use a tag the user named or one you saw on a returned memory — a guessed tag that does not exist in this brain returns nothing"),
         after: z.number().int().optional().describe("Only return entries after this Unix ms timestamp. Useful for narrowing a recovery search to a period the conversation identified"),
         before: z.number().int().optional().describe("Only return entries before this Unix ms timestamp. Useful for narrowing a recovery search to a period the conversation identified"),
@@ -577,13 +723,16 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
         hops: z.number().int().min(0).max(3).default(0).describe("Graph expansion depth: 0 = direct matches only (default); 1–2 also surfaces related memories linked in the graph. Raise it for why/how, chronology, causes, outcomes, or what came before or after; leave it at 0 when direct matches already answer the question"),
         workspace: z.enum(["personal", "company"]).optional().describe("Restrict the search to one layer: personal or the shared company layer. Omit to search both — the default, and right for most questions"),
         team: z.string().optional().describe("When workspace is company, restrict to one team — id from list_teams"),
+        project: projectParam.describe("Search inside one project: its slug from list_projects. Matches the project's own memories and anything its aliases claim. An unknown slug is an error, not an empty result"),
       },
     },
-    async ({ query, topK, tag, after, before, kind, hops, workspace, team }) => {
+    async ({ query, topK, tag, after, before, kind, hops, workspace, team, project }) => {
       const teamRead = identity ? readTeamParam(team, identity, workspace) : {};
       if (teamRead.error) return { content: [{ type: "text", text: teamRead.error }] };
+      const projectRows = await resolveProjectArg(project, workspace, teamRead.teamId);
+      if (typeof projectRows === "string") return { content: [{ type: "text", text: projectRows }] };
       const cfg = await resolveConfig(env);
-      const { matches, insight, semanticUnavailable, queryTokens, compoundStale } = await recallEntries({ query, topK, tag, after, before, kind: kind as MemoryKind | undefined, hops, synthesize: false }, env, ctx, cfg, { identity, workspaceFilter: workspace, teamId: teamRead.teamId });
+      const { matches, insight, semanticUnavailable, queryTokens, compoundStale } = await recallEntries({ query, topK, tag, after, before, kind: kind as MemoryKind | undefined, hops, synthesize: false, project: projectRows }, env, ctx, cfg, { identity, workspaceFilter: workspace, teamId: teamRead.teamId });
 
       const notice = semanticUnavailable
         ? `Note: semantic search was unavailable or incomplete for this query, so these results may be keyword matches only. ${SEMANTIC_UNAVAILABLE_DETAIL}\n\n`
@@ -610,11 +759,14 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
         workspace: z.enum(["personal", "company"]).optional().describe("Restrict the listing to one layer: personal or the shared company layer. Omit to list both"),
         team: z.string().optional().describe("When workspace is company, restrict to one team — id from list_teams"),
         actor: z.string().optional().describe('Only entries written by one person: their display name as it appears in the header, their user id, or "me" for your own'),
+        project: projectParam.describe("Only entries in one project: its slug from list_projects. An unknown slug is an error, not an empty list"),
       },
     },
-    async ({ n, tag, after, before, workspace, team, actor }) => {
+    async ({ n, tag, after, before, workspace, team, actor, project }) => {
       const teamRead = identity ? readTeamParam(team, identity, workspace) : {};
       if (teamRead.error) return { content: [{ type: "text", text: teamRead.error }] };
+      const projectRows = await resolveProjectArg(project, workspace, teamRead.teamId);
+      if (typeof projectRows === "string") return { content: [{ type: "text", text: projectRows }] };
       // The same author filter GET /list takes, through the same resolver, so a
       // name means the same thing on both surfaces. An identity-less caller has
       // no roster to resolve a name against and no actor_id worth trusting, so
@@ -637,7 +789,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       // builder has no hook of its own, and its SQL always ends in ORDER BY.
       // workspace_id and actor_id come back so the header can say which layer a
       // row is in and who wrote it — the same two facts recall reports.
-      let { sql, bindings } = buildEntryFilterQuery({ n, tag, after, before, actor: actorId });
+      let { sql, bindings } = buildEntryFilterQuery({ n, tag, after, before, actor: actorId, project: projectRows });
       if (identity) {
         const scope = scopeWhereForRead(identity, { layer: workspace, teamId: teamRead.teamId });
         sql = sql.includes("WHERE")

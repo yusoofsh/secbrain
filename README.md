@@ -33,6 +33,7 @@ The desktop app is the easiest way to start. It builds your Second Brain and con
 - **Keeps you in control.** Browse, edit, append, connect, share, export, or permanently remove any memory from the dashboard.
 - **Builds useful context.** Automatic classification, duplicate detection, relationships, time-aware ranking, and optional weekly insights help the brain stay useful as it grows.
 - **Captures from where you already work.** Use MCP clients, the CLI, browser extension, Obsidian, Notion, calendars, email, iOS Shortcuts, or the web dashboard.
+- **Acts on what matters next.** Add dates to memories, review overdue and upcoming commitments, and let the installed PWA proactively push a reminder when something becomes due. See the [Reminders and Push guide](https://github.com/rahilp/second-brain-cloudflare/wiki/Reminders-and-Push).
 - **Stays in your account.** Memories, vectors, credentials, and application resources live in your own Cloudflare account.
 
 ### See it in action
@@ -66,7 +67,9 @@ Second Brain runs as a Cloudflare Worker backed by D1, Vectorize, Workers AI, an
 2. **Organize:** Second Brain classifies it, checks for duplicates and contradictions, creates relationships, and indexes it for semantic search.
 3. **Recall:** Ask in natural language. Second Brain retrieves relevant memories, follows useful connections, and returns source-backed context to the tool you are using.
 
-If Vectorize is unavailable, captures and keyword recall continue working. Your memories remain usable while semantic indexing is restored. Keyword recall works for Japanese, Chinese, and other scripts written without spaces, and for full-width text. The shipped embedding models read English best; the desktop app's Settings can switch a brain to a multilingual reading.
+If Vectorize is unavailable, captures and keyword recall continue working. Your memories remain usable while semantic indexing is restored. The shipped embedding models read English best; the desktop app's Settings can switch a brain to a multilingual reading.
+
+Search now finds the hard things: exact names, ticket numbers, versions, and phrases in any language, even when they sit in old memories, and finding them is dramatically faster and cheaper, staying that way as the brain grows, which keeps the free plan comfortable. It does this with a full-text index that ranks matches by relevance instead of scanning every memory. The upgrade is automatic: new installs use the index immediately, existing brains build it over nightly runs, and no client needs updating.
 
 ### Memory tools
 
@@ -78,6 +81,7 @@ If Vectorize is unavailable, captures and keyword recall continue working. Your 
 | `recall` | Find memories by meaning rather than exact wording |
 | `list_recent` | Browse recently saved memories |
 | `list_teams` | List shared teams you belong to (names and ids). In v3.0.0 this is one team; used by MCP clients for future multi-team support |
+| `list_projects` | List projects in scope, with display names, descriptions, and memory counts |
 | `get_prompt_capsule` | Read a deterministic core or project context projection for a gateway-controlled prompt prefix |
 | `get` | Read one memory by ID |
 | `forget` | Permanently delete a memory |
@@ -91,11 +95,16 @@ On a team brain, memory tools accept a `workspace` of `personal` or `company` wh
 
 Optional `team` (workspace id) and MCP `list_teams` / `GET /team/workspaces` are wired for a future multi-team release. **In v3.0.0 you can omit them** — each brain has one shared team and the primary team is used automatically.
 
+### Projects
+
+Memories live on four axes: **workspace** = who can see it (personal / company / team) — tenancy, unchanged. **project** = what it's about — a named, managed container. **tags** = free-form facets, unchanged. **source** = where it came from, unchanged. Call `list_projects` to discover projects in scope and pass `project` on remember to group related memories. A memory can belong to one or more projects; use projects to organize by topic, initiative, or context rather than bare topic tags.
+
 CLI example:
 
 ```bash
 brain remember --workspace company "We ship on Thursdays"
 brain recall --workspace company "when do we ship?"
+brain recall --project website "what did we decide about hosting?"
 ```
 
 ### Prompt Capsules
@@ -107,7 +116,7 @@ every prompt.
 
 A Capsule entry is an ordinary canonical memory with one target tag and one
 slot tag. Core entries use `capsule:core`; project entries use
-`capsule:project:<opaque-project-id>`. Slots are emitted in this fixed order:
+`capsule:project:<project-slug>`. Slots are emitted in this fixed order:
 
 - Core: `identity`, `preferences`, `constraints`, `principles`
 - Project: `current-state`, `decisions`, `open-questions`
@@ -140,7 +149,7 @@ bookkeeping tags; use MCP for this recovery. No teammate content-edit permission
 is added.
 
 Authenticated clients can use `GET|HEAD /prompt-capsules/core`,
-`GET|HEAD /prompt-capsules/projects/<opaque-project-id>`, or the
+`GET|HEAD /prompt-capsules/projects/<project-slug>`, or the
 `get_prompt_capsule` MCP tool. Responses include a strong `ETag`, a SHA-256 of
 the exact prompt-ready `text`, and whole-slot omission metadata for the
 12,000-character budget. Validation happens before serialization: shared invalid,
@@ -172,13 +181,15 @@ and revision changes can add attempts. Writes to ordinary entries do not advance
 the revision. Gateways should revalidate with `If-None-Match` once per session
 rather than on every request.
 
-An empty project Capsule is returned normally but not stored in KV. Project ids
-are caller-selected, so this prevents arbitrary nonexistent ids from consuming
-one KV write and key each. A partial `(workspace_id, id)` index over capsule-tagged
-rows, explicitly selected by the candidate query, also bounds these reads to capsule definitions instead of every ordinary
-memory in the workspace. Its cost grows with capsule-tagged rows, not with the
-ordinary corpus. Empty core Capsules remain cached because core is one fixed
-target per workspace.
+An empty project Capsule is returned normally but not stored in KV. Project
+ids now correspond to registered project slugs and are enumerable through the
+projects registry, but capsule reads remain backward compatible and serve
+unregistered ids normally; nonexistent or mistyped ids cannot consume KV writes
+or keys. A partial `(workspace_id, id)` index over capsule-tagged rows,
+explicitly selected by the candidate query, also bounds these reads to capsule
+definitions instead of every ordinary memory in the workspace. Its cost grows
+with capsule-tagged rows, not with the ordinary corpus. Empty core Capsules
+remain cached because core is one fixed target per workspace.
 
 After a D1 Time Travel restore, redeploy the Worker before resuming traffic so
 schema initialization recreates `prompt_capsule_revisions` and the four
@@ -239,17 +250,6 @@ Having connection issues? See [Connect to AI Clients → Troubleshooting](https:
 
 ### 3. Manual deployment
 
-The existing production `secbrain` Worker deploys from `main` through
-`.github/workflows/deploy-worker.yml`. The workflow reuses the D1, KV,
-Vectorize, Workers AI, route, and cron configuration in `wrangler.jsonc`; it
-does not create resources or run database migrations. `--keep-vars` retains
-dashboard-managed Worker variables, and Wrangler preserves existing secrets.
-GitHub needs the `CLOUDFLARE_ACCOUNT_ID` repository variable and the
-`CLOUDFLARE_API_TOKEN` Actions secret. The Cloudflare token can edit Workers
-Scripts across the Yusoof Moh account, read account settings, user details, and
-memberships, and edit routes only in the `yusoofsh.id` zone. It expires on
-2027-09-27 Jakarta time; rotate the secret before then.
-
 For developers who want full command-line control:
 
 ```bash
@@ -264,7 +264,8 @@ Follow the [Setup Guide](https://github.com/rahilp/second-brain-cloudflare/wiki/
 
 ```bash
 npm run dev      # start the Worker locally
-npm test         # run the test suite
+npm test         # run the test suite (fast: the golden-set eval replays are opt-in)
+npm run test:eval:full   # the full eval (golden-set replays, workerd lock); run by hand before merging a ranking change
 ```
 
 See [Local Development](https://github.com/rahilp/second-brain-cloudflare/wiki/Local-Development) for mixed local/remote Wrangler configuration and sharing a local brain through a tunnel.
@@ -294,6 +295,8 @@ A successful response looks like `{"ok":true,"id":"..."}`.
 See [Capture from Anywhere](https://github.com/rahilp/second-brain-cloudflare/wiki/Capture-from-Anywhere) for setup and usage instructions.
 
 ## What's new in v3
+
+v3.4 adds Projects: named, workspace-bound containers for what a memory is about. Group memories by codebase, client, or goal; adopt years of existing tags retroactively through aliases with no migration; manage everything from a new dashboard tab; and let agents discover and use projects through `list_projects` and the `project` parameter. Nightly digests, prompt capsules, exports, and Claude Code hooks are all project-aware.
 
 Team Edition adds Personal and Shared memory layers, per-person authentication, sharing and attribution, author locks, team administration, capture policies, team-aware recall and graphs, and a private-by-default upgrade from v2.
 
@@ -351,4 +354,3 @@ Release binaries are built from this repository by [GitHub Actions](.github/work
 </a>
 
 [MIT License](LICENSE) · [Discussions](https://github.com/rahilp/second-brain-cloudflare/discussions)
- 

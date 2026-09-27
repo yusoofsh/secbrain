@@ -4,11 +4,13 @@ import { handleOAuthAuthorize } from "../oauth/authorize";
 import { ensureDbReady } from "../runtime/state";
 import { handleCaptureRoutes } from "./capture";
 import { handlePromptCapsuleRoutes } from "./prompt-capsule";
+import { handleProjectsRoutes } from "./projects";
 import { handleRecallRoutes } from "./recall";
 import { handleEntriesRoutes } from "./entries";
 import { handleGraphRoutes } from "./graph";
 import { handleIntegrationsRoutes } from "./integrations";
 import { handleAdminRoutes } from "./admin";
+import { handlePushRoutes } from "./push";
 import { handleBriefRoutes } from "./brief";
 import { handleConfigRoutes } from "./config";
 import { handleMigrationRoutes } from "./migration";
@@ -24,11 +26,13 @@ type RouteHandler = (
 const routeHandlers: RouteHandler[] = [
   handleCaptureRoutes,
   handlePromptCapsuleRoutes,
+  handleProjectsRoutes,
   handleRecallRoutes,
   handleEntriesRoutes,
   handleGraphRoutes,
   handleIntegrationsRoutes,
   handleAdminRoutes,
+  handlePushRoutes,
   handleBriefRoutes,
   handleConfigRoutes,
   handleMigrationRoutes,
