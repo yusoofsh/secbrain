@@ -23,6 +23,7 @@ import { resolveIdentityFromToken } from "./lib/identity";
 import { apiHandler } from "./mcp/handler";
 import { augmentOAuthRegistrationRequest } from "./oauth/register";
 import { defaultHandler } from "./routes";
+import { tickSecbrainEvents } from "./events/secbrain";
 
 export type { Env } from "./env";
 
@@ -62,6 +63,11 @@ export default {
   },
   scheduled: async (event: ScheduledEvent, rawEnv: Env, ctx: ExecutionContext) => {
     const env = withFtsWriteGuard(rawEnv);
+    if (event.cron === "* * * * *") {
+      ctx.waitUntil(tickSecbrainEvents(env).catch(() => console.error("MCP events delivery failed")));
+      return;
+    }
+
     // The jobs are independent, and each begins by awaiting the shared schema init. One
     // of them failing — including on that init — must not take the others down or surface
     // as an unhandled rejection inside waitUntil.

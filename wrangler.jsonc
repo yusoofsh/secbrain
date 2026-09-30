@@ -59,6 +59,8 @@
 	// test/unit/cron-triggers.test.ts fails if it drifts.
 	"triggers": {
 		"crons": [
+			// Independent webhook delivery budget; no maintenance jobs on this trigger.
+			"* * * * *",
 			// Nightly maintenance: compression, graph pass, staleness pass.
 			"0 1 * * *",
 			// Integrations. Hourly, because one provider syncs per run (see

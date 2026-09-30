@@ -3,6 +3,8 @@
 // and per-deploy vars can override it.
 export interface Env extends Omit<Cloudflare.Env, "VECTORIZE_GRACE_MS"> {
   VECTORIZE_GRACE_MS?: string;
+  MCP_EVENTS_RELAY_URL?: string;
+  MCP_EVENTS_RELAY_TOKEN?: string;
 }
 
 // Worker version, echoed by GET /health. The desktop app compares this against
