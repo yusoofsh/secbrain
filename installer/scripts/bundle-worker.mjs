@@ -84,7 +84,9 @@ const d1 = wrangler.d1_databases?.[0];
 const vectorize = wrangler.vectorize?.[0];
 const kv = wrangler.kv_namespaces?.[0];
 if (!d1 || !vectorize || !kv || !wrangler.ai?.binding) {
-  throw new Error("wrangler.jsonc is missing an expected binding (d1/vectorize/kv/ai)");
+  throw new Error(
+    "wrangler.jsonc is missing an expected binding (d1/vectorize/kv/ai)",
+  );
 }
 
 // The bundled Worker's version — the app compares this against a deployed
@@ -114,20 +116,23 @@ function findWorkerVersion(entryFile) {
 
 const workerVersion = findWorkerVersion(resolve(repoRoot, wrangler.main));
 if (!workerVersion) {
-  throw new Error("could not find `export const SB_VERSION = \"...\"` anywhere under src/");
+  throw new Error(
+    'could not find `export const SB_VERSION = "..."` anywhere under src/',
+  );
 }
 
 const manifest = {
-  scriptName: wrangler.name,
+  // The desktop provisions portable brains; the root config names the personal deployment.
+  scriptName: "second-brain",
   workerVersion,
   compatibilityDate: wrangler.compatibility_date,
   compatibilityFlags: wrangler.compatibility_flags ?? [],
   vars: wrangler.vars ?? {},
   cron: wrangler.triggers?.crons ?? [],
   d1Binding: d1.binding,
-  d1Name: d1.database_name,
+  d1Name: "second-brain-db",
   vectorizeBinding: vectorize.binding,
-  vectorizeName: vectorize.index_name,
+  vectorizeName: "second-brain-vectors",
   vectorizeDimensions: VECTORIZE_DIMENSIONS,
   vectorizeMetric: VECTORIZE_METRIC,
   kvBinding: kv.binding,
@@ -176,15 +181,25 @@ await build({
     js: 'import { createRequire as __sbCreateRequire } from "node:module";\nconst require = __sbCreateRequire("/");',
   },
   keepNames: true,
+  minifySyntax: true,
   outfile: resolve(outDir, "worker.js"),
   target: "es2022",
   logLevel: "warning",
 });
 
-cpSync(resolve(repoRoot, wrangler.assets.directory), resolve(outDir, "assets"), {
-  recursive: true,
-  filter: (src) => !src.endsWith(".DS_Store"),
-});
+cpSync(
+  resolve(repoRoot, wrangler.assets.directory),
+  resolve(outDir, "assets"),
+  {
+    recursive: true,
+    filter: (src) => !src.endsWith(".DS_Store"),
+  },
+);
 
-writeFileSync(resolve(outDir, "manifest.json"), JSON.stringify(manifest, null, 2));
-console.log(`worker-dist ready: ${wrangler.name} (${wrangler.compatibility_date})`);
+writeFileSync(
+  resolve(outDir, "manifest.json"),
+  JSON.stringify(manifest, null, 2),
+);
+console.log(
+  `worker-dist ready: ${wrangler.name} (${wrangler.compatibility_date})`,
+);

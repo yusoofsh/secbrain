@@ -51,3 +51,23 @@ it("modern discovery and ordinary tools coexist on the authenticated HTTP edge",
     resetDatabaseInit();
   }
 });
+
+it("event poll endpoint rejects unauthenticated callers before doing event work", async () => {
+  const worker = (await import("../../src/index")).default;
+  const env = makeTestEnv(undefined, {
+    MCP_EVENTS_RELAY_URL: "https://relay.example.test/deliver",
+    MCP_EVENTS_RELAY_TOKEN: "test-private-relay-service-token",
+  });
+  const ctx = { waitUntil: () => {} } as unknown as ExecutionContext;
+  for (const headers of [{}, { Authorization: "Bearer wrong" }] as Record<string,string>[]) {
+    const response = await worker.fetch(
+      new Request("https://example.test/mcp-events/tick", {
+        method: "POST",
+        headers,
+      }),
+      env,
+      ctx,
+    );
+    expect(response.status).toBe(401);
+  }
+});

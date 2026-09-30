@@ -191,11 +191,21 @@ mod tests {
         let js = std::str::from_utf8(worker_script()).unwrap();
         assert!(js.contains("export"));
         // Bundled output may only import workerd-native or cloudflare-provided modules.
-        for line in js.lines().filter(|l| l.trim_start().starts_with("import ")) {
-            assert!(
-                line.contains("\"node:") || line.contains("\"cloudflare:"),
-                "unexpected unbundled import: {line}"
-            );
+        let mut statement = String::new();
+        for line in js.lines() {
+            if statement.is_empty() && !line.trim_start().starts_with("import ") {
+                continue;
+            }
+            statement.push_str(line);
+            statement.push('\n');
+            if line.trim_end().ends_with(';') {
+                assert!(
+                    statement.contains("\"node:") || statement.contains("\"cloudflare:"),
+                    "unexpected unbundled import: {statement}"
+                );
+                statement.clear();
+            }
         }
+        assert!(statement.is_empty(), "unterminated import: {statement}");
     }
 }
