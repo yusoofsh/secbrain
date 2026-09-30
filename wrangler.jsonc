@@ -75,7 +75,8 @@
 			// Day-of-week is "SUN", not "0": Cloudflare's trigger API rejects the
 			// numeric form (code 10100: invalid cron string: 15 2 * * 0), confirmed
 			// empirically. Do not "tidy" this back to 0.
-			"15 2 * * SUN"
+			"15 2 * * SUN",
+			"45 2 * * SUN"
 		]
 	}
 }

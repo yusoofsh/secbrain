@@ -8,7 +8,10 @@ import type { Env } from "./env";
 import { withFtsWriteGuard } from "./db/fts-write-guard";
 import { runNightlyCompression } from "./compression/nightly";
 import { runGraphPass } from "./graph/pass";
-import { INTEGRATION_SYNC_CRON, runScheduledIntegrationSync } from "./integrations/mirror";
+import {
+  INTEGRATION_SYNC_CRON,
+  runScheduledIntegrationSync,
+} from "./integrations/mirror";
 import { pushDueItemsAllWorkspaces } from "./push/send";
 import { runStalenessPass } from "./staleness/pass";
 import { runWhenExtractPass } from "./when/pass";
@@ -17,12 +20,18 @@ import { nextWorkspace } from "./runtime/rotation";
 import { recordNightSummary } from "./runtime/night-summary";
 import { runInsightAccrual } from "./insight/candidates";
 import { companyWorkspaceIds, runWeeklyInsights } from "./insight/weekly";
-import { INSIGHT_ACCRUAL_CRON, INSIGHT_TEAM_WEEKLY_CRON, INSIGHT_WEEKLY_CRON } from "./insight/schedule";
+import {
+  INSIGHT_ACCRUAL_CRON,
+  INSIGHT_TEAM_WEEKLY_CRON,
+  INSIGHT_WEEKLY_CRON,
+} from "./insight/schedule";
 import { resolveConfig } from "./config";
 import { resolveIdentityFromToken } from "./lib/identity";
 import { apiHandler } from "./mcp/handler";
 import { augmentOAuthRegistrationRequest } from "./oauth/register";
 import { defaultHandler } from "./routes";
+import { timingSafeEqual } from "node:crypto";
+import { tickSecbrainEvents } from "./events/secbrain";
 
 export type { Env } from "./env";
 
@@ -54,14 +63,36 @@ export default {
     // once instead of 500ing (see src/db/fts-write-guard.ts).
     const env = withFtsWriteGuard(rawEnv);
     const url = new URL(req.url);
+    if (url.pathname === "/mcp-events/tick") {
+      if (!env.MCP_EVENTS_RELAY_URL || !env.MCP_EVENTS_RELAY_TOKEN)
+        return new Response(null, { status: 404 });
+      const supplied = Buffer.from(req.headers.get("Authorization") ?? ""),
+        expected = Buffer.from("Bearer " + env.MCP_EVENTS_RELAY_TOKEN);
+      if (
+        req.method !== "POST" ||
+        supplied.length !== expected.length ||
+        !timingSafeEqual(supplied, expected)
+      )
+        return new Response(null, { status: 401 });
+      await tickSecbrainEvents(env);
+      return new Response(null, {
+        status: 204,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
     if (url.pathname === "/oauth/register" && req.method === "POST") {
       const augmented = await augmentOAuthRegistrationRequest(req);
       return oauthProvider.fetch(augmented, env as any, ctx);
     }
     return oauthProvider.fetch(req, env as any, ctx);
   },
-  scheduled: async (event: ScheduledEvent, rawEnv: Env, ctx: ExecutionContext) => {
+  scheduled: async (
+    event: ScheduledEvent,
+    rawEnv: Env,
+    ctx: ExecutionContext,
+  ) => {
     const env = withFtsWriteGuard(rawEnv);
+
     // The jobs are independent, and each begins by awaiting the shared schema init. One
     // of them failing — including on that init — must not take the others down or surface
     // as an unhandled rejection inside waitUntil.
@@ -69,7 +100,9 @@ export default {
     // a summary (seeds examined) for POST /insights/accrue to report, and this
     // scheduled path fires the same promise but never reads that value.
     const job = (name: string, run: Promise<unknown>) =>
-      ctx.waitUntil(run.catch((e) => console.error(`${name} failed (non-fatal):`, e)));
+      ctx.waitUntil(
+        run.catch((e) => console.error(`${name} failed (non-fatal):`, e)),
+      );
 
     // Two schedules, two budgets (#290). The free plan's real subrequest ceiling is
     // 1,000 D1/KV/Vectorize calls and 50 external fetch()es per invocation, but every
@@ -80,25 +113,28 @@ export default {
     // real — without the branch both triggers would run everything and the split would
     // cost CPU and D1-cost budget instead of buying it.
     if (event.cron === INTEGRATION_SYNC_CRON) {
-      job("integration sync", (async () => {
-        // Read once for the whole run: the sync's writes and the push pass over every workspace take it,
-        // instead of each resolving its own (a KV read apiece).
-        const cfg = await resolveConfig(env);
-        try {
-          await runScheduledIntegrationSync(env, cfg);
-        } catch (e) {
-          console.error("integration sync failed (non-fatal):", e);
-        }
-        // Own try/catch, run after the sync regardless of whether it
-        // succeeded: due items reaching a subscribed device must not depend
-        // on the mirror sync's health, and a slow or failing sync must not
-        // delay notifications past the hour they were due.
-        try {
-          await pushDueItemsAllWorkspaces(env, cfg);
-        } catch (e) {
-          console.error("push due items failed (non-fatal):", e);
-        }
-      })());
+      job(
+        "integration sync",
+        (async () => {
+          // Read once for the whole run: the sync's writes and the push pass over every workspace take it,
+          // instead of each resolving its own (a KV read apiece).
+          const cfg = await resolveConfig(env);
+          try {
+            await runScheduledIntegrationSync(env, cfg);
+          } catch (e) {
+            console.error("integration sync failed (non-fatal):", e);
+          }
+          // Own try/catch, run after the sync regardless of whether it
+          // succeeded: due items reaching a subscribed device must not depend
+          // on the mirror sync's health, and a slow or failing sync must not
+          // delay notifications past the hour they were due.
+          try {
+            await pushDueItemsAllWorkspaces(env, cfg);
+          } catch (e) {
+            console.error("push due items failed (non-fatal):", e);
+          }
+        })(),
+      );
       return;
     }
 
@@ -145,13 +181,16 @@ export default {
     // thing that settles, and it is keyed per workspace for exactly that
     // reason — see runWeeklyInsights.
     if (event.cron === INSIGHT_TEAM_WEEKLY_CRON) {
-      job("team insights", (async () => {
-        const cfg = await resolveConfig(env);
-        if (cfg.TEAM_INSIGHTS !== "on") return;
-        const ids = await companyWorkspaceIds(env);
-        if (!ids.length) return;
-        await runWeeklyInsights(env, ctx, { onlyWorkspaceIds: ids });
-      })());
+      job(
+        "team insights",
+        (async () => {
+          const cfg = await resolveConfig(env);
+          if (cfg.TEAM_INSIGHTS !== "on") return;
+          const ids = await companyWorkspaceIds(env);
+          if (!ids.length) return;
+          await runWeeklyInsights(env, ctx, { onlyWorkspaceIds: ids });
+        })(),
+      );
       return;
     }
 
@@ -182,62 +221,79 @@ export default {
     // spend, and keeping it sequential and separately caught means a slow or
     // failing model call cannot delay or hide the other three the way
     // bundling it into the same Promise.allSettled would.
-    job("nightly maintenance", (async () => {
-      const [compression, graph, staleness] = await Promise.allSettled([
-        runNightlyCompression(env, ctx, slice),
-        runGraphPass(env, ctx, slice),
-        runStalenessPass(env, ctx, slice),
-      ]);
-      if (compression.status === "rejected") console.error("nightly compression failed (non-fatal):", compression.reason);
-      if (graph.status === "rejected") console.error("graph pass failed (non-fatal):", graph.reason);
-      if (staleness.status === "rejected") console.error("staleness pass failed (non-fatal):", staleness.reason);
+    job(
+      "nightly maintenance",
+      (async () => {
+        const [compression, graph, staleness] = await Promise.allSettled([
+          runNightlyCompression(env, ctx, slice),
+          runGraphPass(env, ctx, slice),
+          runStalenessPass(env, ctx, slice),
+        ]);
+        if (compression.status === "rejected")
+          console.error(
+            "nightly compression failed (non-fatal):",
+            compression.reason,
+          );
+        if (graph.status === "rejected")
+          console.error("graph pass failed (non-fatal):", graph.reason);
+        if (staleness.status === "rejected")
+          console.error("staleness pass failed (non-fatal):", staleness.reason);
 
-      let whenExtracted = 0;
-      let whenJudged = 0;
-      let whenSkipped = 0;
-      try {
-        const whenResult = await runWhenExtractPass(env, ctx, slice);
-        whenExtracted = whenResult.whenExtracted;
-        whenJudged = whenResult.whenJudged;
-        whenSkipped = whenResult.whenSkipped;
-        // The pass has already rolled its own cursor back when this is
-        // false (Finding 1) — logged here only so a real outage is visible
-        // in the tail, not to retry: retrying is what next night already does.
-        if (!whenResult.ok) console.error("when-extraction pass: batch write failed, cursor not advanced (non-fatal)");
-      } catch (e) {
-        console.error("when-extraction pass failed (non-fatal):", e);
-      }
+        let whenExtracted = 0;
+        let whenJudged = 0;
+        let whenSkipped = 0;
+        try {
+          const whenResult = await runWhenExtractPass(env, ctx, slice);
+          whenExtracted = whenResult.whenExtracted;
+          whenJudged = whenResult.whenJudged;
+          whenSkipped = whenResult.whenSkipped;
+          // The pass has already rolled its own cursor back when this is
+          // false (Finding 1) — logged here only so a real outage is visible
+          // in the tail, not to retry: retrying is what next night already does.
+          if (!whenResult.ok)
+            console.error(
+              "when-extraction pass: batch write failed, cursor not advanced (non-fatal)",
+            );
+        } catch (e) {
+          console.error("when-extraction pass failed (non-fatal):", e);
+        }
 
-      // Same shape as the when pass: sequential and separately caught after
-      // the core three. An FTS failure here is non-fatal and recoverable —
-      // the nightly try/catch logs it, and whichever write hit the index
-      // first triggers its own repair — so it must not delay or hide the
-      // when counts or the night summary.
-      try {
-        await runFtsMaintenance(env);
-      } catch (e) {
-        console.error("FTS maintenance failed (non-fatal):", e);
-      }
+        // Same shape as the when pass: sequential and separately caught after
+        // the core three. An FTS failure here is non-fatal and recoverable —
+        // the nightly try/catch logs it, and whichever write hit the index
+        // first triggers its own repair — so it must not delay or hide the
+        // when counts or the night summary.
+        try {
+          await runFtsMaintenance(env);
+        } catch (e) {
+          console.error("FTS maintenance failed (non-fatal):", e);
+        }
 
-      // No single workspace to attribute the summary to: an empty corpus (nothing
-      // ran) or a rotation read failure (the passes fell back to a whole-corpus
-      // scan pre-v3 style, which spans every workspace, not one).
-      //
-      // `== null` deliberately, not `!slice`: "" is the legacy pre-team bucket
-      // and a genuine ring member (src/runtime/rotation.ts), so it must write
-      // night:'' like any other slice. Only null/undefined skip the write.
-      // GET /stats/night reads it back for admins via readableWorkspaces.
-      if (slice == null) return;
+        // No single workspace to attribute the summary to: an empty corpus (nothing
+        // ran) or a rotation read failure (the passes fell back to a whole-corpus
+        // scan pre-v3 style, which spans every workspace, not one).
+        //
+        // `== null` deliberately, not `!slice`: "" is the legacy pre-team bucket
+        // and a genuine ring member (src/runtime/rotation.ts), so it must write
+        // night:'' like any other slice. Only null/undefined skip the write.
+        // GET /stats/night reads it back for admins via readableWorkspaces.
+        if (slice == null) return;
 
-      await recordNightSummary(env, slice, {
-        digestsWritten: compression.status === "fulfilled" ? compression.value.digestsWritten : 0,
-        linksInferred: graph.status === "fulfilled" ? graph.value.inserted : 0,
-        claimsFlagged: staleness.status === "fulfilled" ? staleness.value.flagged : 0,
-        insightsProposed: 0,
-        whenExtracted,
-        whenJudged,
-        whenSkipped,
-      });
-    })());
+        await recordNightSummary(env, slice, {
+          digestsWritten:
+            compression.status === "fulfilled"
+              ? compression.value.digestsWritten
+              : 0,
+          linksInferred:
+            graph.status === "fulfilled" ? graph.value.inserted : 0,
+          claimsFlagged:
+            staleness.status === "fulfilled" ? staleness.value.flagged : 0,
+          insightsProposed: 0,
+          whenExtracted,
+          whenJudged,
+          whenSkipped,
+        });
+      })(),
+    );
   },
 };
