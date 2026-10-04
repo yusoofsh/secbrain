@@ -53,3 +53,5 @@ export function createApiHandler() {
     },
   };
 }
+
+export const apiHandler = createApiHandler();
