@@ -17,7 +17,7 @@ export type PreferenceStore = ReturnType<typeof createPreferenceStore>;
 const table = `CREATE TABLE IF NOT EXISTS mcp_plugin_preferences (
   user_id TEXT PRIMARY KEY,
   values_json TEXT NOT NULL DEFAULT '{}',
-  updated_at INTEGER NOT NULL
+  saved_at INTEGER NOT NULL
 )`;
 
 function effective(raw: string | undefined): Preferences {
@@ -43,14 +43,15 @@ export function createPreferenceStore(db: Env["DB"], userId: string) {
       const patch = update.parse(raw).set;
       try {
         // One D1 transaction creates storage and merges only the supplied fields.
-        // RETURNING describes this write, not a later racing read. No values are cached in KV.
+        // The SELECT remains inside the same atomic batch, not a later racing read.
         const results = await db.batch([
           db.prepare(table),
-          db.prepare(`INSERT INTO mcp_plugin_preferences (user_id, values_json, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET values_json = json_patch(mcp_plugin_preferences.values_json, excluded.values_json), updated_at = excluded.updated_at
-            RETURNING values_json`).bind(userId, JSON.stringify(patch), Date.now()),
+          db.prepare(`INSERT INTO mcp_plugin_preferences (user_id, values_json, saved_at) VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET values_json = json_patch(mcp_plugin_preferences.values_json, excluded.values_json), saved_at = excluded.saved_at
+            `).bind(userId, JSON.stringify(patch), Date.now()),
+          db.prepare("SELECT values_json FROM mcp_plugin_preferences WHERE user_id = ?").bind(userId),
         ]);
-        const row = results[1]?.results?.[0] as { values_json?: unknown } | undefined;
+        const row = results[2]?.results?.[0] as { values_json?: unknown } | undefined;
         if (!results.every(result => result.success) || typeof row?.values_json !== "string") throw new Error("Persistence failed");
         return effective(row.values_json);
       } catch { throw new Error("Preferences could not be saved. Read the current values before retrying."); }
