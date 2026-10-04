@@ -7,7 +7,7 @@ import { createApiHandler } from "../../src/mcp/handler";
 import { modernHandler } from "../../src/mcp/modern";
 import { memoryCards, registerMemoryExplorer, MEMORY_EXPLORER_URI } from "../../src/ui/memory-explorer";
 import { makeTestEnv } from "../helpers/make-env";
-const ctx = { waitUntil: (_: Promise<unknown>) => {} } as ExecutionContext;
+const ctx = { waitUntil(p: Promise<unknown>) { p.catch(() => {}); } } as ExecutionContext;
 const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} };
 function request(method: string, params: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
   const name = params.name ?? params.uri;
