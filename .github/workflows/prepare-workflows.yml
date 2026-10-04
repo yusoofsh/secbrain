@@ -2,7 +2,7 @@ name: Prepare memory workflows
 on:
   push:
     branches: [feat/workflow-runtime-20261004]
-    paths: [.github/workflows/prepare-workflows.yml, scripts/prepare-workflows.mjs]
+    paths: [.github/workflows/prepare-workflows.yml, scripts/prepare-workflows.mjs, test/unit/workflow-review.test.ts]
 permissions:
   contents: write
 concurrency:

@@ -1,6 +1,8 @@
 import { it, expect, vi } from "vitest";
 import { reviewProject, memoryId, memoryUri } from "../../src/workflows/review";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+type FixtureRequest = { name: string; arguments: Record<string, unknown> };
 it("asks for explicit scope and never reads on decline or invalid input", async () => {
   const read = vi.fn();
   expect((await reviewProject({}, undefined, read)).resultType).toBe("input_required");
@@ -14,10 +16,10 @@ it("rejects noncanonical resource paths before authorizing a source", () => {
   for (const uri of ["file:///etc/passwd", "secbrain://memory/../config", "secbrain://memory/a%2Fb", "secbrain://memory/x?token=secret"]) expect(() => memoryId(uri)).toThrow();
 });
 it("hashes full authorized content and marks unavailable sources without retrying or writing", async () => {
-  const callTool = vi.fn(async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
-    if (name === "recall") return { content: [{ type: "text", text: "bounded source coverage" }], _meta: { explorer: { cards: [{ id: "unavailable" }, { id: "a" }, { id: "b" }] } } };
-    if (args.id === "unavailable") return { content: [{ type: "text", text: "No entry found with ID: unavailable" }] };
-    return { content: [{ type: "text", text: "header\nID: " + args.id + "\n" + "same full content".repeat(100) }] };
+  const callTool = vi.fn((request: FixtureRequest) => {
+    if (request.name === "recall") return Promise.resolve({ content: [{ type: "text", text: "bounded source coverage" }], _meta: { explorer: { cards: [{ id: "unavailable" }, { id: "a" }, { id: "b" }] } } });
+    if (request.arguments.id === "unavailable") return Promise.resolve({ content: [{ type: "text", text: "No entry found with ID: unavailable" }] });
+    return Promise.resolve({ content: [{ type: "text", text: "header\nID: " + String(request.arguments.id) + "\n" + "same full content".repeat(100) }] });
   });
   const result = await reviewProject({ query: "fixture", workspace: "personal", project: "" }, undefined, async read => read({ callTool } as unknown as Client)) as any;
   expect(result.structuredContent.changesApplied).toBe(false);
