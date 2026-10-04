@@ -1,6 +1,7 @@
 import { MAX_INPUT_TAGS, MAX_INPUT_TAG_CHARS, projectSlugError, projectTagError, withProjectTag, PROJECT_SLUG_RE } from "../tags/system";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolveConfig } from "../config";
+import { registerMemoryExplorer, memoryExplorerMetadata, memoryCards } from "../ui/memory-explorer";
 import { z } from "zod";
 import type { Env } from "../env";
 import { RECALL_MAX_TOP_K, SEMANTIC_UNAVAILABLE_DETAIL, VECTORIZE_FIX_HINT } from "../constants";
@@ -257,6 +258,7 @@ async function labelsForRows(
 
 export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Identity): McpServer {
   const server = new McpServer({ name: "second-brain", version: "1.0.0" });
+  registerMemoryExplorer(server);
 
   // Absent an Identity (direct construction in tests, or a caller that has not
   // been taught tenancy yet) every write below lands in the legacy owner space
@@ -742,7 +744,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
         return { content: [{ type: "text", text: notice + "Nothing found matching that query." }] };
       }
 
-      return { content: [{ type: "text", text: notice + renderRecallText(matches, insight, { queryTokens, config: cfg, compoundStale }) }] };
+      return { content: [{ type: "text", text: notice + renderRecallText(matches, insight, { queryTokens, config: cfg, compoundStale }) }], _meta: { explorer: { cards: memoryCards(matches) } } };
     }
   );
 
@@ -751,6 +753,8 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
     "list_recent",
     {
       description: LIST_RECENT_DESCRIPTION,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      _meta: memoryExplorerMetadata,
       inputSchema: {
         n: z.number().int().min(1).max(50).default(10),
         tag: z.string().optional(),
@@ -835,7 +839,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
       let text = blocks.join("\n\n");
       if (omitted > 0) text += `\n\n${omitted} more entr${omitted > 1 ? "ies" : "y"} omitted to bound the response size. Lower n, or call get("<id>").`;
 
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text }], _meta: { explorer: { cards: memoryCards(rows.slice(0, blocks.length).map(row => ({ id: String(row.id), content: String(row.content), source: row.source, workspace: layerOfRow(identity, row), createdAt: row.created_at }))) } } };
     }
   );
 
