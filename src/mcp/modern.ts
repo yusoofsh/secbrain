@@ -1,6 +1,7 @@
 import { reviewProject, reviewTool, memoryId } from "../workflows/review";
 import { workflowSkills } from "../workflows/skills";
 import { privateResult, forwardMeta } from "../workflows/core";
+import { settingsReadName, settingsUpdateName, settingsTools, settingsCall, mergeDefaults, type PreferenceStore } from "../workflows/settings";
 import { createMcpHandler, Server, ProtocolError, type ListToolsResult, type CallToolResult } from "@modelcontextprotocol/server";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,7 +11,7 @@ import { EventError } from "../events/core";
 
 type EventHandler = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 /** Existing scoped handlers own data access; the maintained SDK owns the wire protocol. */
-export function modernHandler(factory: () => McpServer, eventHandler?: EventHandler) {
+export function modernHandler(factory: () => McpServer, eventHandler?: EventHandler, preferences?: PreferenceStore) {
   async function delegated<T>(read: (client: Client) => Promise<T>): Promise<T> {
     const source = factory(); const client = new Client({ name: "secbrain-compatibility", version: "1" });
     const [a, b] = InMemoryTransport.createLinkedPair();
@@ -19,7 +20,7 @@ export function modernHandler(factory: () => McpServer, eventHandler?: EventHand
   }
   return createMcpHandler(() => {
     const server = new Server({ name: "second-brain", version: "3.7.0" }, {
-      capabilities: { extensions: { "io.modelcontextprotocol/skills": {} }, tools: {}, resources: {}, ...(eventHandler ? { events: {} } : {}) },
+      capabilities: { extensions: { "io.modelcontextprotocol/skills": {}, ...(preferences ? { "openai/settings": { readTool: settingsReadName, updateTool: settingsUpdateName } } : {}) }, tools: {}, resources: {}, ...(eventHandler ? { events: {} } : {}) },
     });
     server.setRequestHandler("skills/list", { params: z.object({ cursor: z.string().optional() }).strict(), result: z.object({}).passthrough() }, params => {
       try { return { ...privateResult(workflowSkills.list(params.cursor), 30000), resultType: "complete" }; }
@@ -31,11 +32,17 @@ export function modernHandler(factory: () => McpServer, eventHandler?: EventHand
     });
     server.setRequestHandler("tools/list", async (request, ctx) => {
       const result = await delegated(c => c.listTools({ ...request.params, _meta: forwardMeta(request.params?._meta, ctx.mcpReq._meta) }, { signal: ctx.mcpReq.signal }));
-      return { ...result, tools: [...result.tools, reviewTool] as unknown as ListToolsResult["tools"], ttlMs: 0, cacheScope: "private", resultType: "complete" };
+      return { ...result, tools: [...result.tools, reviewTool, ...(preferences ? settingsTools : [])] as unknown as ListToolsResult["tools"], ttlMs: 0, cacheScope: "private", resultType: "complete" };
     });
     server.setRequestHandler("tools/call", async (request, ctx) => {
+      if (preferences && (request.params.name === settingsReadName || request.params.name === settingsUpdateName)) return settingsCall(request.params.name, request.params.arguments, preferences);
       if (request.params.name === reviewTool.name) return reviewProject(request.params.arguments, ctx.mcpReq.inputResponses, delegated);
-      return { ...await delegated(c => c.callTool({ ...request.params, _meta: forwardMeta(request.params._meta, ctx.mcpReq._meta) }, undefined, { signal: ctx.mcpReq.signal })) as unknown as CallToolResult, resultType: "complete" };
+      let args = request.params.arguments;
+      if (preferences && (request.params.name === "list_recent" || request.params.name === "recall")) {
+        try { args = mergeDefaults(request.params.name, args, await preferences.read()); }
+        catch { return { resultType: "complete", isError: true, content: [{ type: "text", text: "Read preferences are unavailable. Read the current preferences before retrying." }] }; }
+      }
+      return { ...await delegated(c => c.callTool({ ...request.params, arguments: args, _meta: forwardMeta(request.params._meta, ctx.mcpReq._meta) }, undefined, { signal: ctx.mcpReq.signal })) as unknown as CallToolResult, resultType: "complete" };
     });
     server.setRequestHandler("resources/list", async (request, ctx) => ({
       ...await delegated(c => c.listResources({ ...request.params, _meta: forwardMeta(request.params?._meta, ctx.mcpReq._meta) }, { signal: ctx.mcpReq.signal })), ttlMs: 0, cacheScope: "private", resultType: "complete",
