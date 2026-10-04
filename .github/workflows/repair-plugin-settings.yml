@@ -1,0 +1,36 @@
+name: Verify preference transaction
+on:
+  push:
+    branches: [feat/persistent-plugin-settings-20261004]
+    paths: [.github/workflows/repair-plugin-settings.yml, scripts/repair-plugin-settings.mjs]
+permissions:
+  contents: write
+concurrency:
+  group: prepare-secbrain-preferences
+  cancel-in-progress: true
+jobs:
+  prepare:
+    if: github.repository == 'yusoofsh/secbrain' && github.ref == 'refs/heads/feat/persistent-plugin-settings-20261004'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - name: Repair the transaction and remove this preparation code
+        run: |
+          node scripts/repair-plugin-settings.mjs
+          git rm scripts/repair-plugin-settings.mjs .github/workflows/repair-plugin-settings.yml
+      - name: Run all type, scope and test checks
+        run: npm run typecheck && npm run check:scope && npm test -- --maxWorkers=2
+      - name: Commit only verified preference changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/workflows/settings.ts PLUGIN-SETTINGS.md
+          git diff --cached --check
+          git commit -m 'Keep concurrent partial settings updates atomic'
+          git push origin HEAD:refs/heads/feat/persistent-plugin-settings-20261004

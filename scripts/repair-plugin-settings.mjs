@@ -1,0 +1,11 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+let source = readFileSync('src/workflows/settings.ts', 'utf8');
+if (source.split('updated_at').length !== 5) throw new Error('Unexpected preference timestamp references');
+source = source.replaceAll('updated_at', 'saved_at');
+source = source.replace('        // RETURNING describes this write, not a later racing read. No values are cached in KV.', '        // The SELECT remains inside the same atomic batch, not a later racing read.');
+const before = '            RETURNING values_json`).bind(userId, JSON.stringify(patch), Date.now()),\n        ]);\n        const row = results[1]?.results?.[0]';
+const after = '            `).bind(userId, JSON.stringify(patch), Date.now()),\n          db.prepare("SELECT values_json FROM mcp_plugin_preferences WHERE user_id = ?").bind(userId),\n        ]);\n        const row = results[2]?.results?.[0]';
+if (source.split(before).length !== 2) throw new Error('Unexpected preference transaction shape');
+writeFileSync('src/workflows/settings.ts', source.replace(before, after));
+const guide = readFileSync('PLUGIN-SETTINGS.md', 'utf8').replace('Results return only after persistence succeeds.', 'Results are selected inside the same atomic D1 batch and return only after persistence succeeds.');
+writeFileSync('PLUGIN-SETTINGS.md', guide);
