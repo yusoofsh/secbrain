@@ -8,6 +8,7 @@ import { buildMcpServer } from "./server";
 import { isMcpToolsListRequest, sanitizeToolsListResponse } from "./sanitize";
 import { secbrainEventHub } from "../events/secbrain";
 import { modernHandler } from "./modern";
+import { createPreferenceStore } from "../workflows/settings";
 
 type McpExecutionContext = ExecutionContext & { props?: { userId?: string } };
 
@@ -38,7 +39,7 @@ export function createApiHandler() {
           }
           return await hub.handle(method, params, owner);
         };
-        const modern = modernHandler(() => buildMcpServer(env, ctx, auth), eventsEnabled ? eventHandler : undefined);
+        const modern = modernHandler(() => buildMcpServer(env, ctx, auth), eventsEnabled ? eventHandler : undefined, createPreferenceStore(env.DB, auth.userId));
         try {
           const response = await modern.fetch(request);
           // No notification streams are advertised. Materialize before closing this per-request bridge.
