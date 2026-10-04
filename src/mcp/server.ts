@@ -1,3 +1,4 @@
+import { registerWorkflowResources } from "../workflows/resources";
 import { MAX_INPUT_TAGS, MAX_INPUT_TAG_CHARS, projectSlugError, projectTagError, withProjectTag, PROJECT_SLUG_RE } from "../tags/system";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolveConfig } from "../config";
@@ -259,6 +260,7 @@ async function labelsForRows(
 export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Identity): McpServer {
   const server = new McpServer({ name: "second-brain", version: "1.0.0" });
   registerMemoryExplorer(server);
+  registerWorkflowResources(server);
 
   // Absent an Identity (direct construction in tests, or a caller that has not
   // been taught tenancy yet) every write below lands in the legacy owner space

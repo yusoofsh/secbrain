@@ -1,3 +1,4 @@
+import { appRoute } from "./deep-link";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appBridge } from "./bridge";
 import { appStyles } from "./styles";
@@ -35,6 +36,7 @@ export const memoryExplorerHtml = `<!doctype html><html lang="en"><head><meta ch
 <div class="grid"><section class="panel"><h2 id="heading">Results</h2><div id="cards" class="cards"></div><details><summary>Source response and coverage notices</summary><pre id="source">No read has been requested.</pre></details></section><aside class="panel"><h2>Selected memory</h2><pre id="selection">Choose a result to inspect it.</pre><button data-read id="full" disabled>Read full memory</button><button id="share" disabled>Use selected context in chat</button><p class="muted">Sharing context is explicit and does not send a chat message, change a memory, or change its access.</p></aside></div>
 </main><script type="module">
 const appName='secbrain-memory-explorer';
+const appRoute=${String(appRoute)};let requestedMemory=null;
 const allowedTools=new Set(['list_recent','recall','get','list_projects']);
 let selectedText='',selectedId=null,hasSnapshot=false,lastOperation='recent';
 ${appBridge}
@@ -50,5 +52,6 @@ async function runRead(kind){if(busy)return;await clearSharedContext();lastOpera
 byId('recent').addEventListener('click',()=>{void runRead('recent');});byId('search').addEventListener('click',()=>{void runRead('search');});byId('projects').addEventListener('click',()=>{void runRead('projects');});byId('query').addEventListener('keydown',event=>{if(event.key==='Enter')void runRead('search');});
 for(const id of ['workspace','project'])byId(id).addEventListener('change',()=>{byId('cards').replaceChildren();byId('source').textContent='Filter changed. Request a new read.';selectedId=null;selectedText='';byId('selection').textContent='No selection.';void clearSharedContext();updateButtons();});
 byId('full').addEventListener('click',()=>{if(selectedId){lastOperation='full';void read('get',{id:selectedId});}});
-function onReady(){if(!hasSnapshot)void runRead('recent');}
+function onDeepLink(value){const route=appRoute(value);if(route?.kind==='memory'){requestedMemory=route.id;if(ready&&!busy){selectedId=requestedMemory;lastOperation='full';void read('get',{id:selectedId});}}}
+function onReady(){if(requestedMemory){selectedId=requestedMemory;lastOperation='full';void read('get',{id:selectedId});}else if(!hasSnapshot)void runRead('recent');}
 </script></body></html>`;

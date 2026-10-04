@@ -7,7 +7,7 @@ function notice(text){ byId('notice').textContent=text; }
 function send(message){ window.parent.postMessage(message,parentOrigin||'*'); }
 function request(method,params){return new Promise((resolve,reject)=>{const id=++sequence; const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Request timed out'));},60000);pending.set(id,{resolve,reject,timer});send({jsonrpc:'2.0',id,method,params});});}
 function setBusy(value){busy=value; document.querySelectorAll('[data-read]').forEach(button=>{button.disabled=!ready||busy;});updateButtons();}
-function applyContext(context){if(context?.theme==='dark'||context?.theme==='light')document.documentElement.style.colorScheme=context.theme;if(typeof context?.locale==='string')document.documentElement.lang=context.locale;}
+function applyContext(context){if(context?.["openai/deepLink"]&&typeof onDeepLink==="function")onDeepLink(context["openai/deepLink"]);if(context?.theme==='dark'||context?.theme==='light')document.documentElement.style.colorScheme=context.theme;if(typeof context?.locale==='string')document.documentElement.lang=context.locale;}
 window.addEventListener('message',event=>{if(event.source !== window.parent)return;if(parentOrigin && event.origin!==parentOrigin)return;const m=event.data;if(!m||m.jsonrpc!=='2.0')return;
  if((typeof m.id==='number'||typeof m.id==='string') && pending.has(m.id) && ('result' in m || 'error' in m)){const p=pending.get(m.id);clearTimeout(p.timer);pending.delete(m.id);if(!parentOrigin && event.origin!=='null')parentOrigin=event.origin;if(m.error)p.reject(new Error('Host request failed'));else p.resolve(m.result);return;}
  if(m.method==='ui/notifications/tool-result'){if(!busy)receive(m.params);}
