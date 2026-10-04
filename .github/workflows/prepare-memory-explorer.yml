@@ -27,7 +27,7 @@ jobs:
           node scripts/prepare-memory-explorer.mjs
           git rm .github/workflows/prepare-memory-explorer.yml scripts/prepare-memory-explorer.mjs
       - name: Validate the full scope, type and test contracts
-        run: npm run check:scope && npm run typecheck && npm test
+        run: npm run check:scope && npm run typecheck && npm test -- --maxWorkers=2
       - name: Verify the Worker artifact without deployment
         run: npx --no-install wrangler deploy --dry-run --outdir /tmp/secbrain-explorer-worker
       - name: Commit validated source on the feature branch only
