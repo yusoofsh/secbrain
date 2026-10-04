@@ -2,7 +2,7 @@ name: Prepare Memory Explorer
 on:
   push:
     branches: [feat/memory-explorer-extension-20261004]
-    paths: [.github/workflows/prepare-memory-explorer.yml, scripts/prepare-memory-explorer.mjs, src/mcp/handler.ts, src/mcp/modern.ts, test/integration/memory-explorer.test.ts]
+    paths: [.github/workflows/prepare-memory-explorer.yml, scripts/prepare-memory-explorer.mjs, src/mcp/handler.ts, src/mcp/modern.ts, test/integration/memory-explorer.test.ts, test/integration/event-http.test.ts]
 permissions:
   contents: write
 concurrency:
