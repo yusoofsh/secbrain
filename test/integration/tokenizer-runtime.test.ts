@@ -6,7 +6,7 @@
  * tripwire for a future workerd or ICU bump.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { Miniflare } from "miniflare";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { build } from "esbuild";
 import { resolve } from "node:path";
 import { tokenizeQuery } from "../../src/text/tokenize";
@@ -38,7 +38,7 @@ describe("tokenizeQuery inside workerd matches Node (#326 ICU pin)", () => {
       target: "esnext",
     });
     const lib = bundle.outputFiles[0].text;
-    mf = new Miniflare({
+    mf = new Miniflare(convertV4MiniflareOptions({
       modules: true,
       compatibilityDate: "2026-06-17",
       compatibilityFlags: ["nodejs_compat"],
@@ -49,7 +49,7 @@ export default {
     return Response.json({ segmenter: typeof Intl.Segmenter, tokens: queries.map(q => tokenizeQuery(q)) });
   },
 };`,
-    });
+    }));
   }, 30_000);
 
   afterAll(async () => {

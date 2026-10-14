@@ -20,7 +20,7 @@
  * production in this repo before, in both directions.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { Miniflare } from "miniflare";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import worker from "../../src/index";
@@ -119,11 +119,11 @@ describe("POST /update and the MCP update tool write identical state (#289)", ()
   let d1: D1Database;
 
   beforeAll(async () => {
-    mf = new Miniflare({
+    mf = new Miniflare(convertV4MiniflareOptions({
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } };",
       d1Databases: { DB: "update-parity" },
-    });
+    }));
     d1 = (await mf.getD1Database("DB")) as unknown as D1Database;
     // The real migration, so the columns under test are the ones production has —
     // updated_at in particular is a runtime ALTER that db/schema.sql does not carry.
