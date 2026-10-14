@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CF_SEND_TELEMETRY: "false"
+
 concurrency:
   group: secbrain-production
   cancel-in-progress: false
@@ -29,7 +32,7 @@ jobs:
         run: bun scripts/predeploy-guard.mjs
 
       - name: Deploy the existing Worker
-        run: bun run --bun wrangler deploy --keep-vars
+        run: bunx --no-install cf deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "cf dev",
     "dev:demo": "wrangler dev -c wrangler.demo.jsonc --port 8799",
     "predeploy": "node scripts/predeploy-guard.mjs",
     "check:scope": "node scripts/check-scope.mjs",
-    "deploy": "wrangler deploy",
+    "deploy": "cf deploy",
     "deploy:worker": "node scripts/release.mjs worker",
     "deploy:app": "node scripts/release.mjs app",
     "deploy:all": "node scripts/release.mjs all",
@@ -26,7 +26,9 @@
     "test:eval:public-download": "EVAL_PUBLIC_DOWNLOAD=1 vitest run test/eval/public/download.test.ts",
     "eval:recall": "node scripts/eval-run-ts.mjs test/eval/cli.ts",
     "cf-typegen": "wrangler types",
-    "typecheck": "wrangler types && tsc --noEmit"
+    "typecheck": "wrangler types && tsc --noEmit",
+    "build": "cf build",
+    "tail": "wrangler tail secbrain"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.2",
@@ -42,6 +44,7 @@
     "@huggingface/transformers": "^4.3.0",
     "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
+    "cf": "^1.0.0-beta.16",
     "esbuild": "^0.28.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
