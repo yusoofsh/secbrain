@@ -2,6 +2,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { buildMcpServer } from "../../src/mcp/server";
+import { reviewTool } from "../../src/workflows/review";
+import { settingsTools } from "../../src/workflows/settings";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { makeTestEnv, makeTestDb, makeVectorizeMock, makeMemoryKV } from "../helpers/make-env";
@@ -17,6 +19,9 @@ import { ensureTenantBootstrap } from "../../src/lib/tenancy";
 import { createMember } from "../../src/lib/team-admin";
 
 const ctx = { waitUntil: (_: Promise<unknown>) => {} } as ExecutionContext;
+
+// Capitalized words; short connectors may stay lower case after the first word.
+const TITLE_CASE = /^[A-Z][A-Za-z]*(?: (?:[A-Z][A-Za-z]*|a|an|and|for|of|the|to))*$/;
 
 const EXPECTED_TOOLS = [
   "remember",
@@ -72,6 +77,15 @@ describe("MCP tools contract (InMemoryTransport)", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name).sort();
       expect(names).toEqual([...EXPECTED_TOOLS].sort());
+    });
+  });
+
+  it("gives every tool a Title Case display title", async () => {
+    await withMcpClient(env, async (client) => {
+      const { tools } = await client.listTools();
+      for (const tool of [...tools, reviewTool, ...settingsTools]) {
+        expect(tool.title, tool.name).toMatch(TITLE_CASE);
+      }
     });
   });
 

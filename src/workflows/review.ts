@@ -7,7 +7,7 @@ import { observedManifest } from "./core";
 
 export const reviewChoices = z.object({ query: z.string().trim().min(1).max(500), workspace: z.enum(["personal", "company"]), project: z.string().max(80).regex(/^[a-z0-9_-]*$/) }).strict();
 export const reviewTool = {
-  name: "review_project_memory", title: "Review project memories",
+  name: "review_project_memory", title: "Review Project Memories",
   description: "Prepare a bounded read-only review packet from authorized memories. Ask for subject, workspace and project when missing. Fetch up to five full sources, retain exact content digests and reference URIs, identify only exact duplicates, and require a separate approved operation for any correction.",
   inputSchema: { type: "object" as const, properties: { query: { type: "string", maxLength: 500 }, workspace: { type: "string", enum: ["personal", "company"] }, project: { type: "string", maxLength: 80 } }, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
