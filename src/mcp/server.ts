@@ -289,6 +289,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "list_teams",
     {
+      title: "List Teams",
       description: LIST_TEAMS_DESCRIPTION,
       inputSchema: {},
     },
@@ -310,6 +311,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "list_projects",
     {
+      title: "List Projects",
       description: LIST_PROJECTS_DESCRIPTION,
       inputSchema: {
         workspace: z.enum(["personal", "company"]).optional().describe("Restrict to one layer: personal or the shared company layer. Omit to list both"),
@@ -342,6 +344,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "remember",
     {
+      title: "Remember",
       description: REMEMBER_DESCRIPTION,
       inputSchema: {
         content: z.string().refine(value => !value.includes("\0"), "NUL is not allowed").describe("The idea, task, or note to store — one distinct item, written so it still makes sense on its own months from now"),
@@ -436,6 +439,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "append",
     {
+      title: "Append",
       description: APPEND_DESCRIPTION,
       inputSchema: {
         id: z.string().describe("Entry ID to append to — from recall or list_recent"),
@@ -520,6 +524,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "update",
     {
+      title: "Update",
       description: UPDATE_DESCRIPTION,
       inputSchema: {
         id: z.string().describe("Entry ID to update — from recall or list_recent"),
@@ -590,6 +595,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "set_status",
     {
+      title: "Set Status",
       description: "Set a memory's lifecycle status. 'canonical' = confirmed/authoritative (protected from auto-overwrite), 'draft' = tentative, 'deprecated' = no longer accurate (removed from recall, kept for audit). Get the entry ID from recall or list_recent first.",
       inputSchema: {
         id: z.string().describe("Entry ID — from recall or list_recent"),
@@ -615,6 +621,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "share",
     {
+      title: "Share",
       description: SHARE_DESCRIPTION,
       inputSchema: {
         id: z.string().describe("Entry ID — from recall or list_recent"),
@@ -644,6 +651,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "get_prompt_capsule",
     {
+      title: "Get Prompt Capsule",
       description: "Return one deterministic Prompt Capsule and its strong ETag. This read-only tool is for gateways that construct stable prompt prefixes; use recall for query-specific context. Only entries with canonical status are included: give the entry canonical status in its tags at remember time, or call set_status canonical afterwards. To re-slot an entry, use update with tags containing the complete capsule: and capsule-slot: definition.",
       inputSchema: {
         kind: z.enum(["core", "project"]).describe("Capsule kind"),
@@ -716,6 +724,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "recall",
     {
+      title: "Recall",
       description: RECALL_DESCRIPTION,
       inputSchema: {
         query: z.string().describe("Natural language search query. Say what the topic is and what you are trying to do with it, and name the subject explicitly — resolve references like \"it\", \"that project\", or \"the last one\" from the conversation before querying"),
@@ -754,6 +763,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "list_recent",
     {
+      title: "List Recent",
       description: LIST_RECENT_DESCRIPTION,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       _meta: memoryExplorerMetadata,
@@ -851,6 +861,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "get",
     {
+      title: "Get",
       description: GET_DESCRIPTION,
       inputSchema: {
         id: z.string().describe("Entry ID from recall or list_recent"),
@@ -886,6 +897,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "forget",
     {
+      title: "Forget",
       description: "Permanently delete an entry from your second brain by ID. Only call when the user explicitly asks to delete something. Confirm the entry ID using recall or list_recent first. This action cannot be undone.",
       inputSchema: {
         id: z.string().describe("Entry ID from recall or list_recent"),
@@ -912,6 +924,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "link",
     {
+      title: "Link",
       description: "Create an explicit relationship link between two memories by ID (e.g. connect a decision to its outcome). Get the IDs from recall or list_recent first.",
       inputSchema: {
         source_id: z.string().describe("Source entry ID"),
@@ -952,6 +965,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "unlink",
     {
+      title: "Unlink",
       description: "Remove a relationship link between two memories by ID. Use when a link is incorrect or no longer relevant. Get the IDs from recall or connections first.",
       inputSchema: {
         source_id: z.string().describe("Source entry ID"),
@@ -975,6 +989,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "connections",
     {
+      title: "Connections",
       description: CONNECTIONS_DESCRIPTION,
       inputSchema: {
         id: z.string().describe("Entry ID from recall or list_recent"),

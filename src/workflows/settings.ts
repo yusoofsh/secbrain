@@ -69,10 +69,10 @@ export const settingsSchema = {
   required: ["recentLimit", "recallLimit", "defaultLayer", "defaultProject"],
 };
 export const settingsTools: Tool[] = [
-  { name: settingsReadName, title: "Plugin preferences", description: "Read your effective non-secret plugin preferences without changing stored data.",
+  { name: settingsReadName, title: "Plugin Preferences", description: "Read your effective non-secret plugin preferences without changing stored data.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, _meta: { ui: { visibility: ["app"] } } },
-  { name: settingsUpdateName, title: "Save plugin preferences", description: "Save the supplied non-secret preferences for the authenticated user. Omitted fields stay unchanged. This changes preferences only, never memories, project membership or sharing permissions.",
+  { name: settingsUpdateName, title: "Save Plugin Preferences", description: "Save the supplied non-secret preferences for the authenticated user. Omitted fields stay unchanged. This changes preferences only, never memories, project membership or sharing permissions.",
     inputSchema: { type: "object", properties: { set: { type: "object", properties: settingsSchema.properties, additionalProperties: false, minProperties: 1 } }, required: ["set"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }, _meta: { ui: { visibility: ["app"] } } },
 ];
