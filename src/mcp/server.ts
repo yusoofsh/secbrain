@@ -763,7 +763,7 @@ export function buildMcpServer(env: Env, ctx: ExecutionContext, identity?: Ident
   server.registerTool(
     "list_recent",
     {
-      title: "List Recent",
+      title: "Secbrain",
       description: LIST_RECENT_DESCRIPTION,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       _meta: memoryExplorerMetadata,

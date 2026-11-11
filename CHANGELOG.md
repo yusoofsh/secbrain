@@ -4,7 +4,7 @@ All notable changes to Second Brain are documented here. Version numbers match `
 
 ## [Unreleased]
 
-- Tools now carry a Title Case display title, so clients that show it, such as ChatGPT, list "List Recent" instead of `list_recent`. Tool names and behavior are unchanged.
+- Tools now carry a Title Case display title, so clients that show it, such as ChatGPT, list "Secbrain" instead of `list_recent` for the recent-memories tool. Tool names and behavior are unchanged.
 
 ## [3.7.0] — Search that puts the right answer first
 
