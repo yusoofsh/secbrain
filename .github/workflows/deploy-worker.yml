@@ -47,7 +47,7 @@ jobs:
           fi
           if grep -q "Trigger configuration" deploy.log && grep -q "10072" deploy.log; then
             echo "::warning::cf reported a partial trigger update (10072); reconciling from wrangler.jsonc"
-            bun scripts/ensure-crons.mjs
+            bun deploy/ensure-crons.mjs
             exit $?
           fi
           exit "$status"
