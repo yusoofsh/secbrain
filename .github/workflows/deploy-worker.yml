@@ -31,8 +31,26 @@ jobs:
       - name: Validate deployment scope
         run: bun scripts/predeploy-guard.mjs
 
+      # The Worker code is replaced before triggers are set, so a refused
+      # trigger update leaves a live Worker and a red run. On this account the
+      # Workers Free five-trigger cap makes the cf CLI's schedule request fail
+      # once the account total reaches five (code 10072), while a bare array
+      # PUT to the same endpoint still works. Reconcile the schedules from
+      # wrangler.jsonc in that one case instead of failing the deploy.
       - name: Deploy the existing Worker
-        run: bunx --no-install cf deploy
+        run: |
+          set +e
+          bunx --no-install cf deploy 2>&1 | tee deploy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -q "Trigger configuration" deploy.log && grep -q "10072" deploy.log; then
+            echo "::warning::cf reported a partial trigger update (10072); reconciling from wrangler.jsonc"
+            bun scripts/ensure-crons.mjs
+            exit $?
+          fi
+          exit "$status"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
