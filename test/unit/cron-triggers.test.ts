@@ -104,15 +104,16 @@ describe("cron triggers", () => {
     expect(maintenance.length).toBeGreaterThan(0);
   });
 
-  // This deployment is AT five as of the team insight pass (spec 4.5) — the
-  // last slot the free plan allows. The assertion stays `<= 5` rather than
-  // `=== 5` because the ceiling is the fact worth pinning, but the message
-  // says where we are, so the next person adding a schedule reads "there is
-  // no sixth slot; displace one" instead of "five is a comfortable margin".
+  // This deployment uses four of the free plan's five triggers: the team
+  // insight pass has no slot of its own (see the absence test below). The
+  // assertion stays `<= 5` rather than `=== 4` because the ceiling is the fact
+  // worth pinning, but the message says where we are, so the next person
+  // adding a schedule reads "there is no sixth slot; displace one" instead of
+  // "five is a comfortable margin".
   it("stays inside the free plan's five triggers", () => {
     expect(
       configuredCrons().length,
-      "the free plan allows five cron triggers and this deployment now uses all five — a sixth schedule has to displace one",
+      "the free plan allows five cron triggers and this deployment already uses the slots it needs — a sixth schedule has to displace one",
     ).toBeLessThanOrEqual(5);
   });
 
@@ -135,8 +136,11 @@ describe("cron triggers", () => {
     expect(crons).toContain(INSIGHT_WEEKLY_CRON);
   });
 
-  it("configures the team insight schedule the worker routes on", () => {
-    expect(configuredCrons()).toContain(INSIGHT_TEAM_WEEKLY_CRON);
+  it("leaves the team insight schedule unscheduled so the deploy fits the free plan", () => {
+    // The account is at the Workers Free five-trigger cap, so the fork does not
+    // schedule the team weekly pass. TEAM_INSIGHTS is off by default, and the
+    // worker still routes the trigger if it is added back later.
+    expect(configuredCrons()).not.toContain(INSIGHT_TEAM_WEEKLY_CRON);
   });
 
   // The personal weekly pass and the team one are two budgets on the same day
