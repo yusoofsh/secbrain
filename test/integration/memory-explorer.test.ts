@@ -25,14 +25,15 @@ describe("Memory Explorer", () => {
     expect(cards.every(card => card.preview.length === 600 && card.truncated)).toBe(true);
     expect(JSON.stringify(cards)).not.toContain("not-a-projected-field");
   });
-  it("preserves the fifteen existing tool names and adds a static private UI resource", async () => {
+  it("preserves every tool and adds a static private UI resource", async () => {
     const source = buildMcpServer(makeTestEnv(), ctx);
     const client = new Client({ name: "fixture", version: "1" });
     const [a, b] = InMemoryTransport.createLinkedPair();
     try {
       await source.connect(a); await client.connect(b);
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(15);
+      // Upstream 4.0.3 ships twenty tools; the explorer adds no tool of its own.
+      expect(tools).toHaveLength(20);
       const tool = tools.find(t => t.name === "list_recent")!;
       expect(tool.annotations?.readOnlyHint).toBe(true);
       expect((tool._meta?.ui as { resourceUri: string }).resourceUri).toBe(MEMORY_EXPLORER_URI);

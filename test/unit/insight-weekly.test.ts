@@ -153,6 +153,8 @@ describe("runWeeklyInsights()", () => {
     // candidate `pending` would re-propose and re-reason over the same pair
     // every week forever, so it must be `used` even though nothing was written.
     seedCandidates(sqlite, 1);
+    // The block needs a real row behind the match: a vector with no readable row decides nothing.
+    sqlite.seed({ id: "existing", content: "An earlier insight about the same pair.", createdAt: 1 });
     const env = makeTestEnv(undefined, {
       DB: sqlite.db as any,
       AI: makeAI(GOOD),
@@ -467,6 +469,8 @@ describe("runWeeklyInsights()", () => {
     // an entry that was never created would be a dangling row every later
     // reader has to defend against.
     seedCandidates(sqlite, 1);
+    // The block needs a real row behind the match: a vector with no readable row decides nothing.
+    sqlite.seed({ id: "existing", content: "An earlier insight about the same pair.", createdAt: 1 });
     const env = makeTestEnv(undefined, {
       DB: sqlite.db as any,
       AI: makeAI(GOOD),
@@ -783,6 +787,21 @@ describe("runWeeklyInsights()", () => {
       expect(payload).toMatchObject({ candidatesDrawn: 1, candidatesReasoned: 0, written: 0 });
       logSpy.mockRestore();
     });
+  });
+
+  // Codex review class E (T-0089.4.2): a candidate accrued clean can have either side held by the
+  // time this weekly pass draws it, days later. Its content must never reach reasonOverPair.
+  it("never draws a candidate whose side was held after accrual, and never reasons over it", async () => {
+    seedCandidates(sqlite, 1);
+    sqlite.db.prepare(`UPDATE entries SET tags = '["pricing","quarantine:instruction","status:draft"]' WHERE id = 'b-0'`).run();
+    const env = makeTestEnv(undefined, {
+      DB: sqlite.db as any, AI: makeAI(GOOD), OAUTH_KV: makeMemoryKV(),
+    });
+
+    await runWeeklyInsights(env, ctx);
+
+    expect(await insightCount(sqlite)).toBe(0);
+    expect(await statusOf(sqlite, "cand-0")).toBe("pending"); // never reached, so never settled either way
   });
 
   it("does not throw when the pass fails", async () => {

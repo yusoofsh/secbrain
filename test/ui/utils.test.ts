@@ -26,7 +26,7 @@ i18nCtx.initI18n("en");
 (globalThis as any).localeTag = i18nCtx.localeTag;
 (globalThis as any).getLocale = i18nCtx.getLocale;
 
-const { parseRecallResult, escHtml, escAttr, toDateStr, vectorizeHealthBanner, vectorizeBannerHtml, syncVectorizeBanner, workspaceFilterChip, syncWorkspaceFilterChip, csvCell, csvDocument, layerChipHtml } = require("../../public/utils.js");
+const { parseRecallResult, escHtml, escAttr, toDateStr, vectorizeHealthBanner, vectorizeBannerHtml, syncVectorizeBanner, workspaceFilterChip, syncWorkspaceFilterChip, csvCell, csvDocument, layerChipHtml, providerName } = require("../../public/utils.js");
 
 // Minimal fake document so the banner DOM glue can be tested in the node
 // environment without jsdom. appendChild registers the element by id so a later
@@ -311,7 +311,10 @@ describe("vectorizeHealthBanner", () => {
     const b = vectorizeHealthBanner({ ok: false, vectorize: { ok: false, indexName: "second-brain-vectors", error: "index not found" } });
     expect(b).not.toBeNull();
     expect(b.title).toContain("second-brain-vectors");
-    expect(b.command).toBe("npx wrangler vectorize create second-brain-vectors --dimensions=384 --metric=cosine");
+    expect(b.command).toBe(
+      "npx wrangler vectorize create second-brain-vectors --dimensions=384 --metric=cosine\n\n"
+      + "npx wrangler vectorize create-metadata-index second-brain-vectors --propertyName=workspace_id --type=string",
+    );
     expect(b.gui).toContain("Vectorize Edit");
   });
 
@@ -353,6 +356,18 @@ describe("syncVectorizeBanner", () => {
     expect(doc.getElementById("vectorize-banner")).toBe(el);
     expect(el.innerHTML).toContain("second-brain-vectors");
     expect(doc.body.style.paddingTop).toBe("24px");
+  });
+
+  it("re-offsets the body when the fix steps open and the banner grows", () => {
+    const doc = makeFakeDoc();
+    const listeners: Record<string, () => void> = {};
+    const create = doc.createElement;
+    doc.createElement = () => ({ ...create(), querySelector: () => ({ addEventListener: (ev: string, fn: () => void) => { listeners[ev] = fn; } }) });
+    const el = syncVectorizeBanner(doc, { title: "t", command: "c", gui: "g" });
+    expect(doc.body.style.paddingTop).toBe("24px");
+    el.offsetHeight = 140;
+    listeners.toggle();
+    expect(doc.body.style.paddingTop).toBe("140px");
   });
 
   it("reuses the existing element and updates its content instead of recreating", () => {
@@ -586,5 +601,33 @@ describe("layerChipHtml", () => {
     expect(html).toContain("&lt;script&gt;");
     // And the title attribute is still a single well-formed attribute.
     expect(html).toContain('title="Visible to the whole team');
+  });
+});
+
+/**
+ * providerName() is the {provider} in a sentence ("by the Notion sync"), a
+ * different job from sourceBadge's lowercase chip label - the two must not
+ * be collapsed into one function just because they both read a source id.
+ */
+describe("providerName", () => {
+  it("names a synced integration by its brand", () => {
+    expect(providerName("notion")).toBe("Notion");
+    expect(providerName("calendar-google")).toBe("Google Calendar");
+    expect(providerName("email-icloud")).toBe("iCloud Mail");
+  });
+
+  it("names a source that is not a synced integration", () => {
+    expect(providerName("github")).toBe("GitHub");
+    expect(providerName("git-hook")).toBe("Git");
+    expect(providerName("obsidian")).toBe("Obsidian");
+  });
+
+  it("passes an unknown id through unchanged, rather than showing nothing", () => {
+    expect(providerName("some-future-provider")).toBe("some-future-provider");
+  });
+
+  it("passes null/empty through unchanged", () => {
+    expect(providerName(null)).toBe(null);
+    expect(providerName("")).toBe("");
   });
 });
