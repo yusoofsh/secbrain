@@ -5,10 +5,8 @@ import type { RecallInternalOptions } from "../../src/recall/types";
 import { NeuronBudget, ReplayStore, makeReplayAi } from "./ai-replay";
 import { loadCorpus, type LoadedCorpus } from "./corpus/loader";
 import { ACTORS, EVAL_NOW, IDENTITIES, WORKSPACES, type CorpusEntry } from "./corpus/types";
-import { EMBEDDING_DIMS } from "./ai-replay";
 import { readScopeWorkspaces } from "../../src/lib/scope";
 import { vectorizeFilterState } from "../../src/vectorize/scope";
-import { ExactVectorize } from "./vectorize-emulator";
 import { EVAL_TOP_K, RUNNER_VERSION, findLeaks, freezeClock, readReport, runVariant, writeReport } from "./runner";
 import type { EmbeddingProducer, GoldenQuery, VariantReport } from "./types";
 import { hashVector } from "./vectors";
@@ -67,6 +65,48 @@ async function corpus(dryOther?: (model: string, input: unknown) => unknown): Pr
 }
 const run = (c: LoadedCorpus, name = "no-rerank", isolate: "warm" | "cold" = "warm") =>
   runVariant({ corpus: c, variant: getVariant(name), queries, isolate, embeddingModel: MODEL });
+
+it("uses a query's as-of clock and excludes later documents without changing the next query's clock", async () => {
+  const c = await corpus();
+  const at = EVAL_NOW - 3 * 86_400_000;
+  const dated: GoldenQuery[] = [
+    { ...queries[0], id: "dated", asOf: at },
+    { ...queries[0], id: "undated" },
+  ];
+  await runVariant({ corpus: c, variant: getVariant("no-rerank"), queries: dated, isolate: "cold", embeddingModel: MODEL });
+  expect(seen.find(call => call.params.query === "xylo alpha" && call.now === at)?.params.before).toBe(at + 1);
+  expect(seen.some(call => call.params.query === "xylo alpha" && call.now === EVAL_NOW && call.params.before === undefined)).toBe(true);
+});
+
+it("passes asOf only for a query carrying asOfParam (T-0089.2.6), ahead of B3 adding the param to recallEntries", async () => {
+  const c = await corpus();
+  const at = EVAL_NOW - 5 * 86_400_000;
+  const withAsOfParam: GoldenQuery[] = [
+    { ...queries[0], id: "with-asof-param", asOfParam: at },
+    { ...queries[0], id: "without-asof-param" },
+  ];
+  await runVariant({ corpus: c, variant: getVariant("no-rerank"), queries: withAsOfParam, isolate: "cold", embeddingModel: MODEL });
+  const withCall = seen.find(call => call.params.query === "xylo alpha" && (call.params as { asOf?: number }).asOf === at);
+  expect(withCall).toBeDefined();
+  const withoutCall = seen.find(call => call.params.query === "xylo alpha" && !("asOf" in call.params));
+  expect(withoutCall).toBeDefined();
+});
+
+it("measures standing cosine from the embedding used by recall", async () => {
+  const q: GoldenQuery = { id: "standing-probe", category: "standing", text: "arranging a flight", gold: [{ id: "st-one", grade: 2 }], viewer: "avery", tags: ["standing:yes", "split:dev"] };
+  const c = await loadCorpus({
+    spec: { id: "standing-probe", intent: "tie", entries: [{ ...row("st-one", "When arranging a flight, check the calendar"), tags: ["standing"] }], edges: [], queries: [q] },
+    backend: "sqlite", replay: makeReplayAi({ store: new ReplayStore([]), mode: "dry" }), embeddingModel: MODEL,
+  });
+  open.push(c);
+  const report = await runVariant({ corpus: c, variant: getVariant("no-rerank"), queries: [q], isolate: "cold", embeddingModel: MODEL });
+  expect(report.standing?.memories).toBe(1);
+  expect(report.standing?.groups.yes).toBe(1);
+  // Deliberate: Task 2 (T-0089.7.1) moved the reported grid from THRESHOLD_GRID (13) to THRESHOLD_GRID_FINE (21).
+  expect(report.standing?.inputs.distilled.curve).toHaveLength(21);
+  expect(report.standing?.inputs.raw.curve).toHaveLength(21);
+  expect(report.results[0].error).toBeUndefined();
+});
 
 describe("runVariant", () => {
   it("returns per-query results with real cost fields and no cross-workspace leaks", async () => {
@@ -243,7 +283,7 @@ describe("degraded recalls", () => {
 
   it("records a rejected workspace filter as degraded", async () => {
     const c = await corpus();
-    (c.env as { VECTORIZE: unknown }).VECTORIZE = new ExactVectorize({ dimensions: EMBEDDING_DIMS[MODEL]!, indexedProperties: [] });
+    (c.env as { VECTORIZE: unknown }).VECTORIZE = c.vectorize.withMetadataIndexes([]);
     const report = await run(c);
     expect(report.results.every(r => r.degraded?.includes("vectorize-filter-unfiltered"))).toBe(true);
   });
@@ -423,7 +463,7 @@ describe("stand-in failures fail closed", () => {
 describe("isolate hygiene", () => {
   const strict = async () => {
     const c = await corpus();
-    (c.env as { VECTORIZE: unknown }).VECTORIZE = new ExactVectorize({ dimensions: EMBEDDING_DIMS[MODEL]!, indexedProperties: [] });
+    (c.env as { VECTORIZE: unknown }).VECTORIZE = c.vectorize.withMetadataIndexes([]);
     return c;
   };
   const probes = (r: Awaited<ReturnType<typeof run>>) => r.results.map(x => x.cost.vectorizeQueries);
@@ -440,8 +480,12 @@ describe("isolate hygiene", () => {
     const c = await strict();
     const warm = await run(c, "no-rerank", "warm");
     const cold = await run(c, "no-rerank", "cold");
-    expect(probes(warm).every(n => n === 1)).toBe(true);
-    expect(probes(cold).every(n => n === 2)).toBe(true);
+    const healthy = await run(await corpus(), "no-rerank", "warm");
+    // Recall issues two dense queries. Once learned, a missing index costs what a healthy one
+    // does; a cold isolate re-learns it with one unfiltered probe per query.
+    expect(probes(healthy)).toEqual([2, 2, 2]);
+    expect(probes(warm)).toEqual([2, 2, 2]);
+    expect(probes(cold)).toEqual([3, 3, 3]);
   });
 
   it("restores Date.now even when the run itself throws", async () => {
