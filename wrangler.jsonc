@@ -83,8 +83,12 @@
 			// Day-of-week is "SUN", not "0": Cloudflare's trigger API rejects the
 			// numeric form (code 10100: invalid cron string: 15 2 * * 0), confirmed
 			// empirically. Do not "tidy" this back to 0.
-			"15 2 * * SUN",
-			"45 2 * * SUN"
+			"15 2 * * SUN"
+			// The team weekly insight pass ("45 2 * * SUN",
+			// INSIGHT_TEAM_WEEKLY_CRON) is not scheduled here: the account is on the
+			// Workers Free plan, which allows five cron triggers per account and this
+			// Worker already uses five. TEAM_INSIGHTS is off by default, so the pass
+			// would never run; add the trigger back only after freeing a slot.
 		]
 	}
 }
